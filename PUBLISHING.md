@@ -39,6 +39,34 @@ git push origin main --follow-tags
 
 The workflow verifies the package, skips safely if that exact package version is already on npm, and publishes with npm Trusted Publishing.
 
+## Testing Releases
+
+npm does not have a separate testing mode for published packages. The standard approach is prerelease versions plus npm dist-tags:
+
+- Stable versions such as `0.2.0` publish with the `latest` tag.
+- Prerelease versions such as `0.2.0-beta.0` publish with the `next` tag.
+
+Users who run `npm install @ralphkrauss/agent-orchestrator-mcp` get `latest`. Testers can opt in with:
+
+```bash
+npm install @ralphkrauss/agent-orchestrator-mcp@next
+npx -y @ralphkrauss/agent-orchestrator-mcp@next doctor
+```
+
+Create a prerelease from the current stable version with:
+
+```bash
+npm version prerelease --preid beta
+git push origin main --follow-tags
+```
+
+Promote a tested prerelease by publishing a normal semver release:
+
+```bash
+npm version patch
+git push origin main --follow-tags
+```
+
 ## First Manual npm Publish
 
 The first public publish of a scoped npm package must make public access explicit:
