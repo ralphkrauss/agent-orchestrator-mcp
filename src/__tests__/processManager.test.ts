@@ -152,6 +152,8 @@ process.stdin.on('end', () => {
     assert.equal(meta.observed_model, 'claude-opus-4-7');
     assert.equal(meta.model_source, 'backend_default');
     assert.deepStrictEqual(meta.worker_invocation, { command: cli, args: [] });
+    assert.equal(meta.last_activity_source, 'terminal');
+    assert.ok(meta.last_activity_at);
   });
 
   it('includes parsed worker error events in failed results without final result events', async () => {
@@ -184,11 +186,51 @@ process.stdin.on('end', () => {
       stdinPayload: 'finish',
     });
 
-    await managed.completion;
+    const meta = await managed.completion;
     const result = await store.loadResult(run.run_id);
+    assert.equal(meta.status, 'failed');
+    assert.equal(meta.terminal_reason, 'backend_fatal_error');
+    assert.equal(meta.latest_error?.category, 'invalid_model');
+    assert.equal(meta.latest_error?.fatal, true);
     assert.equal(result?.status, 'failed');
     assert.equal(result?.summary, "The 'openai/gpt-5.5' model is not supported when using Codex with a ChatGPT account.");
     assert.ok(result?.errors.some((error) => error.message.includes('not supported when using Codex with a ChatGPT account')));
-    assert.ok(result?.errors.some((error) => error.message === 'worker result event missing'));
+    assert.equal(result?.errors.some((error) => error.message === 'worker result event missing'), false);
+  });
+
+  it('fails fast when stderr contains a fatal backend error', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-process-'));
+    const cli = join(root, 'worker.js');
+    await writeFile(cli, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  console.error('Authentication failed: invalid API key');
+  setInterval(() => {}, 1000);
+});
+`);
+    await chmod(cli, 0o755);
+
+    const store = new RunStore(root);
+    const run = await store.createRun({ backend: 'codex', cwd: root });
+    const manager = new ProcessManager(store);
+    const managed = await manager.start(run.run_id, new CodexBackend(), {
+      command: cli,
+      args: [],
+      cwd: root,
+      stdinPayload: 'finish',
+    });
+
+    const meta = await Promise.race([
+      managed.completion,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('timed out waiting for fatal stderr')), 3_000)),
+    ]);
+    const result = await store.loadResult(run.run_id);
+    const events = await store.readEvents(run.run_id);
+    assert.equal(meta.status, 'failed');
+    assert.equal(meta.terminal_reason, 'backend_fatal_error');
+    assert.equal(meta.latest_error?.category, 'auth');
+    assert.equal(meta.latest_error?.source, 'stderr');
+    assert.equal(result?.summary, 'Authentication failed: invalid API key');
+    assert.ok(events.events.some((event) => event.type === 'error' && String(event.payload.text ?? '').includes('Authentication failed')));
   });
 });
