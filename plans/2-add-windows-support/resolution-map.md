@@ -93,6 +93,7 @@ Total comments: 6 | Fixed: 6 | Deferred: 0 | Declined: 0 | Escalated: 0
 
 - `git diff --check`: pass
 - CI failure in workflow run `25246936259`: diagnosed as the simulated Windows diagnostics test writing lowercase `.cmd` shims while using uppercase `.CMD` in `PATHEXT` on case-sensitive Linux runners; fixed by aligning the simulated extension with the generated shim names.
+- CI failure in workflow run `25247757711`: diagnosed as the mock command processor using `#!/usr/bin/env node` after the test replaced `PATH` with only the simulated Windows bin directory; fixed by using the absolute `process.execPath` shebang in that helper.
 - Conflict marker scan across `src` and `plans/2-add-windows-support`: pass
 - Native Windows IPC smoke: added as a Windows-only test; not executed in this Linux workspace
 - `pnpm build` / `pnpm test`: not rerun locally because `node_modules` is absent and repository instructions require explicit approval before installing packages.

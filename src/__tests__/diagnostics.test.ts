@@ -227,7 +227,7 @@ process.exit(1);
 }
 
 async function writeWindowsCommandProcessor(path: string): Promise<void> {
-  const script = `#!/usr/bin/env node
+  const script = `#!${process.execPath}
 const { basename } = require('node:path');
 
 const commandLine = process.argv.at(-1) || '';
