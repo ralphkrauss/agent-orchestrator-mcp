@@ -23,10 +23,13 @@ node dist/cli.js
 
 ## Prerequisites
 
-- POSIX environment. v1 uses Unix sockets and POSIX process groups. Windows named pipes are not implemented.
 - Node.js 22 or newer.
 - Codex CLI installed and authenticated if you want Codex workers.
 - Claude CLI installed and authenticated if you want Claude workers.
+
+Linux and macOS use Unix sockets and POSIX process groups. Windows uses a
+per-store named pipe for daemon IPC and `taskkill` for worker process-tree
+cancellation.
 
 The MCP package never installs or bundles worker CLIs. Missing workers are reported by diagnostics and by failed run results, but one missing backend does not prevent the MCP server from starting.
 
@@ -41,7 +44,7 @@ npx -y @ralphkrauss/agent-orchestrator-mcp@latest doctor --json
 
 Diagnostics check:
 
-- POSIX support
+- platform and POSIX process-group availability
 - Node version
 - run-store accessibility
 - `codex` and `claude` binary presence
@@ -53,6 +56,7 @@ Diagnostics check:
 Diagnostics do not make model calls. If auth cannot be proven locally without a model call, the backend reports `auth_unknown` with a next-step hint.
 
 Supervisor agents can use the MCP tool `get_backend_status` to retrieve the same diagnostics.
+When called through the daemon, that report also includes the frontend package version, daemon package version, daemon PID, and whether the two package versions match.
 
 ## MCP Client Config
 
@@ -133,13 +137,14 @@ There are two processes:
 
 | Process | Responsibility | Lifetime |
 |---|---|---|
-| `agent-orchestrator-mcp` | Stdio MCP server. Translates MCP tool calls into JSON-RPC requests over a Unix socket. Holds no run state. | Same lifetime as the MCP client. Restarts are expected. |
+| `agent-orchestrator-mcp` | Stdio MCP server. Translates MCP tool calls into JSON-RPC requests over a local daemon IPC endpoint. Holds no run state. | Same lifetime as the MCP client. Restarts are expected. |
 | `agent-orchestrator-mcp-daemon` | Owns worker subprocesses, active run handles, timeouts, cancellation, follow-up session reuse, and the durable run store. | Long-lived. Auto-started by the MCP server or controlled manually. |
 
 The guarantee is deliberately scoped:
 
 - MCP-client or supervisor restarts preserve run state and in-flight runs because the daemon keeps running.
 - Daemon restarts do not preserve in-flight worker ownership. On daemon startup, any run still marked `running` becomes terminal `orphaned` with the previous daemon PID and worker PID in the error context.
+- Package upgrades can restart the stdio MCP frontend without restarting the daemon. If their package versions differ, tool calls return `DAEMON_VERSION_MISMATCH` with both versions and a restart hint instead of failing later with stale method or result-shape errors.
 
 ## Daemon Lifecycle
 
@@ -154,6 +159,8 @@ agent-orchestrator-mcp-daemon watch
 agent-orchestrator-mcp-daemon start
 agent-orchestrator-mcp-daemon stop
 agent-orchestrator-mcp-daemon stop --force
+agent-orchestrator-mcp-daemon restart
+agent-orchestrator-mcp-daemon restart --force
 agent-orchestrator-mcp-daemon prune --older-than-days 30 --dry-run
 agent-orchestrator-mcp-daemon prune --older-than-days 30
 ```
@@ -165,10 +172,18 @@ npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-m
 npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon runs
 npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon watch
 npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon stop --force
+npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon restart
+npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon restart --force
 npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon prune --older-than-days 30 --dry-run
 ```
 
-`stop` refuses while runs are active and prints the active run IDs. `stop --force` cancels active runs through the normal cancellation path, waits for terminal statuses, and exits. Direct `SIGTERM`/`SIGINT` to the daemon behaves like `stop --force`; `SIGKILL` cannot be caught and any in-flight runs become `orphaned` on next daemon startup.
+`stop` refuses while runs are active and prints the active run IDs. `stop --force` cancels active runs through the normal cancellation path, waits for terminal statuses, and exits. `restart` uses the same safe default and refuses active runs; `restart --force` cancels active runs before starting a fresh daemon. Direct `SIGTERM`/`SIGINT` to the daemon behaves like `stop --force`; `SIGKILL` cannot be caught and any in-flight runs become `orphaned` on next daemon startup.
+
+After changing the configured npm version or dist-tag, restart the daemon so it picks up the same package build as the MCP frontend:
+
+```bash
+npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon restart
+```
 
 `prune` deletes only terminal runs with `finished_at` older than the requested age. Use `--dry-run` first to inspect the matching run IDs.
 
@@ -225,10 +240,10 @@ Default location:
 
 ```text
 ~/.agent-orchestrator/
-  daemon.sock
   daemon.log
   daemon.pid
   config.json
+  daemon.sock        (POSIX only)
   runs/
     <run-id>/
       meta.json
@@ -247,12 +262,13 @@ AGENT_ORCHESTRATOR_HOME=/path/to/store
 
 Security behavior:
 
-- The root directory is created as `0700`.
-- If the root directory exists and is owned by another UID, startup aborts.
-- If the root directory is owned by the current UID but has broader permissions, startup coerces it to `0700`.
-- `daemon.sock` is bound under a restrictive umask so the socket file is `0600`.
-- `daemon.pid` is written as `0600`.
-- A stale socket is unlinked only when it is owned by the current UID.
+- The root directory is created with user-only permissions where the platform supports POSIX modes.
+- On POSIX, if the root directory exists and is owned by another UID, startup aborts.
+- On POSIX, if the root directory is owned by the current UID but has broader permissions, startup coerces it to `0700`.
+- On POSIX, `daemon.sock` is bound under a restrictive umask so the socket file is `0600`.
+- On Windows, the daemon listens on a named pipe derived from the run-store path; there is no socket file to remove.
+- `daemon.pid` is written with `0600` mode where supported.
+- A stale POSIX socket is unlinked only when it is owned by the current UID.
 
 Secrets and CLI credentials are not stored by the MCP package. Worker authentication comes from the host CLI's normal auth state or from environment variables already present when the MCP server/daemon starts. Do not pass API keys as MCP tool arguments; those requests can be logged by clients.
 
@@ -316,18 +332,25 @@ session-resume audit state. Older runs without these fields load with
 
 ## Operational Notes
 
-This package is for trusted local MCP clients. Worker processes run with the current user's OS privileges, inherit the daemon environment, and can use whatever credentials the host Codex or Claude CLI can access. Do not expose the daemon socket to untrusted users or pass secrets as MCP tool arguments.
+This package is for trusted local MCP clients. Worker processes run with the current user's OS privileges, inherit the daemon environment, and can use whatever credentials the host Codex or Claude CLI can access. Do not expose the daemon IPC endpoint to untrusted users or pass secrets as MCP tool arguments.
 
 Concurrent runs against the same `cwd` are the supervisor's responsibility. The orchestrator does not create worktrees, isolate file systems, or lock a working directory. If two workers edit the same files, they can conflict.
 
 If a daemon restart marks a run `orphaned`, the previous worker process may still be consuming CPU or API tokens. Inspect `~/.agent-orchestrator/daemon.log` and the run result for the previous daemon PID and worker PID, then clean up manually if needed.
 
-Prefer killing the process group when you know the PGID:
+On POSIX, prefer killing the process group when you know the PGID:
 
 ```bash
 kill -TERM -<worker-pgid>
 sleep 5
 kill -KILL -<worker-pgid>
+```
+
+On Windows, use the worker PID from the run result:
+
+```powershell
+taskkill /PID <worker-pid> /T
+taskkill /PID <worker-pid> /T /F
 ```
 
 ## Development

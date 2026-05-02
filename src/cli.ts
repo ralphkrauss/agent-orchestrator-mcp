@@ -28,6 +28,7 @@ Daemon lifecycle:
   agent-orchestrator-mcp-daemon watch [--interval-ms <ms>] [--limit <n>]
   agent-orchestrator-mcp-daemon start
   agent-orchestrator-mcp-daemon stop [--force]
+  agent-orchestrator-mcp-daemon restart [--force]
   agent-orchestrator-mcp-daemon prune --older-than-days <days> [--dry-run]
 `);
 } else {

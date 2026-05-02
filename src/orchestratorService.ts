@@ -32,6 +32,7 @@ import { resolveBinary } from './backend/common.js';
 import { getBackendStatus } from './diagnostics.js';
 import { captureGitSnapshot } from './gitSnapshot.js';
 import { buildObservabilitySnapshot } from './observability.js';
+import { getPackageVersion } from './packageMetadata.js';
 import { ProcessManager, type ManagedRun } from './processManager.js';
 import { RunStore } from './runStore.js';
 
@@ -47,6 +48,10 @@ const defaultConfig: OrchestratorConfig = {
 
 type ToolResult = ToolResponse<object>;
 type OrchestratorLogger = (message: string) => void;
+
+export interface OrchestratorDispatchContext {
+  frontend_version?: string | null;
+}
 
 export class OrchestratorService {
   private readonly processManager: ProcessManager;
@@ -69,10 +74,10 @@ export class OrchestratorService {
     await this.orphanRunningRuns();
   }
 
-  async dispatch(method: string, params: unknown): Promise<unknown> {
+  async dispatch(method: string, params: unknown, context: OrchestratorDispatchContext = {}): Promise<unknown> {
     switch (method) {
       case 'ping':
-        return wrapOk({ pong: true, daemon_pid: process.pid });
+        return wrapOk({ pong: true, daemon_pid: process.pid, daemon_version: getPackageVersion() });
       case 'shutdown':
         return this.shutdown(params);
       case 'prune_runs':
@@ -94,9 +99,15 @@ export class OrchestratorService {
       case 'cancel_run':
         return this.cancelRun(params);
       case 'get_backend_status':
-        return wrapOk({ status: await getBackendStatus() });
+        return wrapOk({
+          status: await getBackendStatus({
+            frontendVersion: context.frontend_version ?? getPackageVersion(),
+            daemonVersion: getPackageVersion(),
+            daemonPid: process.pid,
+          }),
+        });
       case 'get_observability_snapshot':
-        return this.getObservabilitySnapshot(params);
+        return this.getObservabilitySnapshot(params, context);
       default:
         return wrapErr(orchestratorError('INVALID_INPUT', `Unknown method: ${method}`));
     }
@@ -261,7 +272,7 @@ export class OrchestratorService {
     return wrapOk(await this.store.pruneTerminalRuns(parsed.data.older_than_days, parsed.data.dry_run));
   }
 
-  async getObservabilitySnapshot(params: unknown): Promise<ToolResult> {
+  async getObservabilitySnapshot(params: unknown, context: OrchestratorDispatchContext = {}): Promise<ToolResult> {
     const parsed = GetObservabilitySnapshotInputSchema.safeParse(params);
     if (!parsed.success) return invalidInput(parsed.error.message);
     return wrapOk({
@@ -270,7 +281,11 @@ export class OrchestratorService {
         includePrompts: parsed.data.include_prompts,
         recentEventLimit: parsed.data.recent_event_limit,
         daemonPid: process.pid,
-        backendStatus: parsed.data.diagnostics ? await getBackendStatus() : null,
+        backendStatus: parsed.data.diagnostics ? await getBackendStatus({
+          frontendVersion: context.frontend_version ?? getPackageVersion(),
+          daemonVersion: getPackageVersion(),
+          daemonPid: process.pid,
+        }) : null,
       }),
     });
   }

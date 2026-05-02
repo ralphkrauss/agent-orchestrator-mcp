@@ -6,6 +6,7 @@ import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { IpcClient, IpcRequestError } from '../ipc/client.js';
 import { daemonPaths } from './paths.js';
+import { getPackageVersion } from '../packageMetadata.js';
 import { RunStore, type PruneRunsResult } from '../runStore.js';
 import { buildObservabilitySnapshot } from '../observability.js';
 import { getBackendStatus } from '../diagnostics.js';
@@ -29,6 +30,9 @@ async function main(): Promise<void> {
     case 'stop':
       await stop(process.argv.includes('--force'));
       break;
+    case 'restart':
+      await restart(process.argv.includes('--force'));
+      break;
     case 'status':
       await status();
       break;
@@ -42,7 +46,7 @@ async function main(): Promise<void> {
       await prune();
       break;
     default:
-      process.stderr.write('Usage: daemonCli.js start | stop [--force] | status [--verbose|--json] | runs [--json] [--prompts] | watch [--interval-ms <ms>] [--limit <n>] | prune --older-than-days <days> [--dry-run]\n');
+      process.stderr.write('Usage: daemonCli.js start | stop [--force] | restart [--force] | status [--verbose|--json] | runs [--json] [--prompts] | watch [--interval-ms <ms>] [--limit <n>] | prune --older-than-days <days> [--dry-run]\n');
       process.exit(1);
   }
 }
@@ -65,7 +69,7 @@ async function start(): Promise<void> {
 }
 
 async function stop(force: boolean): Promise<void> {
-  const client = new IpcClient(paths.socket);
+  const client = new IpcClient(paths.ipc.path);
   try {
     const result = await client.request('shutdown', { force }, 10_000) as { ok: boolean; error?: { details?: { active_runs?: unknown } } };
     if (!result.ok) {
@@ -81,6 +85,16 @@ async function stop(force: boolean): Promise<void> {
   }
 }
 
+async function restart(force: boolean): Promise<void> {
+  if (await ping()) {
+    await stop(force);
+    await waitForStopped(5_000);
+  } else {
+    process.stdout.write('agent-orchestrator daemon is stopped\n');
+  }
+  await start();
+}
+
 async function status(): Promise<void> {
   if (process.argv.includes('--verbose') || process.argv.includes('--json')) {
     const envelope = await readSnapshotFromDaemonOrStore(snapshotOptionsFromArgs({ includePrompts: process.argv.includes('--prompts') }));
@@ -92,13 +106,24 @@ async function status(): Promise<void> {
     return;
   }
 
-  const client = new IpcClient(paths.socket);
+  const client = new IpcClient(paths.ipc.path);
   try {
-    const pingResult = await client.request('ping', {}) as { ok: true; pong: true; daemon_pid: number };
-    const listResult = await client.request('list_runs', {}) as { ok: true; runs: { status: string }[] };
-    const counts = new Map<string, number>();
-    for (const run of listResult.runs) counts.set(run.status, (counts.get(run.status) ?? 0) + 1);
-    process.stdout.write(`running pid=${pingResult.daemon_pid} runs=${JSON.stringify(Object.fromEntries(counts))}\n`);
+    const pingResult = await client.request('ping', {}) as { ok: true; pong: true; daemon_pid: number; daemon_version?: string };
+    let runs = 'unavailable';
+    try {
+      const listResult = await client.request('list_runs', {}) as { ok: true; runs: { status: string }[] };
+      const counts = new Map<string, number>();
+      for (const run of listResult.runs) counts.set(run.status, (counts.get(run.status) ?? 0) + 1);
+      runs = JSON.stringify(Object.fromEntries(counts));
+    } catch (error) {
+      if (!(error instanceof IpcRequestError && error.orchestratorError.code === 'DAEMON_VERSION_MISMATCH')) {
+        throw error;
+      }
+    }
+    const daemonVersion = typeof pingResult.daemon_version === 'string' ? pingResult.daemon_version : null;
+    const frontendVersion = getPackageVersion();
+    const versionMatch = daemonVersion === frontendVersion;
+    process.stdout.write(`running pid=${pingResult.daemon_pid} daemon_version=${daemonVersion ?? 'unknown'} frontend_version=${frontendVersion} version_match=${versionMatch} runs=${runs}\n`);
   } catch {
     process.stdout.write('stopped\n');
     process.exitCode = 1;
@@ -222,7 +247,7 @@ async function prune(): Promise<void> {
   };
   let result: PruneRunsResult;
   if (await ping()) {
-    const client = new IpcClient(paths.socket);
+    const client = new IpcClient(paths.ipc.path);
     result = await client.request('prune_runs', params, 30_000) as PruneRunsResult;
   } else {
     result = await new RunStore(paths.home).pruneTerminalRuns(params.older_than_days, params.dry_run);
@@ -260,7 +285,7 @@ async function readSnapshotFromDaemonOrStore(options: SnapshotOptions): Promise<
     diagnostics: options.diagnostics,
   };
   if (await ping()) {
-    const client = new IpcClient(paths.socket);
+    const client = new IpcClient(paths.ipc.path);
     const result = await client.request('get_observability_snapshot', params, 30_000) as {
       ok: boolean;
       snapshot?: ObservabilitySnapshot;
@@ -277,14 +302,18 @@ async function readSnapshotFromDaemonOrStore(options: SnapshotOptions): Promise<
       includePrompts: options.includePrompts,
       recentEventLimit: options.recentEventLimit,
       daemonPid: null,
-      backendStatus: options.diagnostics ? await getBackendStatus() : null,
+      backendStatus: options.diagnostics ? await getBackendStatus({
+        frontendVersion: getPackageVersion(),
+        daemonVersion: null,
+        daemonPid: null,
+      }) : null,
     }),
   };
 }
 
 async function ping(): Promise<boolean> {
   try {
-    const client = new IpcClient(paths.socket);
+    const client = new IpcClient(paths.ipc.path);
     await client.request('ping', {}, 1000);
     return true;
   } catch {
@@ -299,6 +328,15 @@ async function waitForDaemon(timeoutMs: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error('daemon did not start before timeout');
+}
+
+async function waitForStopped(timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!await ping()) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error('daemon did not stop before timeout');
 }
 
 async function readPid(): Promise<string | null> {
