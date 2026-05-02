@@ -31,10 +31,10 @@ Total comments: 5 | Fixed: 5 | To defer: 0 | To decline: 0 | To escalate: 0
 - **Comment:** Document `status --json` in the top-level help.
 - **Independent Assessment:** Valid. `src/daemon/daemonCli.ts` supports `status --json`, and the top-level CLI help advertises `status --verbose` but not the JSON form.
 - **Decision:** fix-as-suggested
-- **Approach:** Add `agent-orchestrator-mcp-daemon status --json` to the daemon lifecycle help block in `src/cli.ts`. Update the CLI help test if needed.
+- **Approach:** Add `agent-orchestrator-daemon status --json` to the daemon lifecycle help block in `src/cli.ts`. Update the CLI help test if needed.
 - **Files To Change:** `src/cli.ts`, `src/__tests__/daemonCli.test.ts`
 - **Reply Draft:**
-  > **[AI Agent]:** Fixed. Top-level help now advertises `agent-orchestrator-mcp-daemon status --json`, and the help test asserts it. <!-- agent-orchestrator:pr12:c2 -->
+  > **[AI Agent]:** Fixed. Top-level help now advertises `agent-orchestrator-daemon status --json`, and the help test asserts it. <!-- agent-orchestrator:pr12:c2 -->
 
 ## Comment 3 | fixed | minor
 

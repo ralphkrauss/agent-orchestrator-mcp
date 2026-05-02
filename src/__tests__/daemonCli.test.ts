@@ -18,10 +18,10 @@ describe('daemon CLI', () => {
   it('documents restart and dashboard commands in the top-level CLI help', async () => {
     const result = await execFileAsync(process.execPath, [cliPath, '--help'], { timeout: 5_000 });
 
-    assert.match(result.stdout, /agent-orchestrator-mcp-daemon restart \[--force\]/);
-    assert.match(result.stdout, /agent-orchestrator-mcp-daemon status --json/);
-    assert.match(result.stdout, /agent-orchestrator-mcp-daemon runs \[--json\] \[--prompts\]/);
-    assert.match(result.stdout, /agent-orchestrator-mcp-daemon watch \[--interval-ms <ms>\] \[--limit <n>\]/);
+    assert.match(result.stdout, /agent-orchestrator-daemon restart \[--force\]/);
+    assert.match(result.stdout, /agent-orchestrator-daemon status --json/);
+    assert.match(result.stdout, /agent-orchestrator-daemon runs \[--json\] \[--prompts\]/);
+    assert.match(result.stdout, /agent-orchestrator-daemon watch \[--interval-ms <ms>\] \[--limit <n>\]/);
   });
 
   it('restarts a stopped daemon and reports matching versions in status', async () => {

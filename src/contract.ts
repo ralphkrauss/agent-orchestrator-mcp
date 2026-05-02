@@ -507,7 +507,7 @@ export function orchestratorError(
 }
 
 export const DAEMON_VERSION_MISMATCH_RECOVERY_HINT =
-  'Restart the daemon so it picks up the current package build: agent-orchestrator-mcp-daemon restart';
+  'Restart the daemon so it picks up the current package build: agent-orchestrator-daemon restart';
 
 export function daemonVersionMismatchError(input: {
   frontendVersion: string | null;
