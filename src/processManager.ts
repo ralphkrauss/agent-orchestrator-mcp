@@ -49,8 +49,18 @@ export class ProcessManager {
     let lastActivityMs = Date.now();
     let lastPersistedActivityMs = 0;
     const persistenceTasks: Promise<void>[] = [];
+    let persistenceFailed = false;
+    let persistenceError: unknown;
     const trackPersistence = (task: Promise<unknown>) => {
-      persistenceTasks.push(task.then(() => undefined, () => undefined));
+      persistenceTasks.push(task.then(
+        () => undefined,
+        (error) => {
+          if (!persistenceFailed) {
+            persistenceFailed = true;
+            persistenceError = error;
+          }
+        },
+      ));
     };
     const recordActivity = (source: Parameters<RunStore['recordActivity']>[1], options: { force?: boolean } = {}) => {
       const now = new Date();
@@ -190,6 +200,7 @@ export class ProcessManager {
           await Promise.allSettled(parseTasks);
           await Promise.allSettled(persistenceTasks);
           try {
+            if (persistenceFailed) throw persistenceError;
             return await this.finalizeRun(
               runId,
               backend,

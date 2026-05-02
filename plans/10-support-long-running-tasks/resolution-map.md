@@ -2,16 +2,20 @@
 
 Branch: `10-support-long-running-tasks`
 Created: 2026-05-02
+Updated: 2026-05-02 after commit `83fb0f2`
 PR: https://github.com/ralphkrauss/agent-orchestrator/pull/19
+Head reviewed: `83fb0f2ad2831a5f2f31a93afe19fddfc9092ab9`
 
-Total unique comments: 7 | To fix: 5 | To defer: 0 | To decline: 2 | To escalate: 0
+Current unique unresolved comments: 1 | To fix: 1 | To defer: 0 | To decline: 0 | To escalate: 0
 
 Skipped:
 
 - CodeRabbit walkthrough/conversation summary comment: informational bot output.
-- CodeRabbit LGTM/additional praise comments: informational.
-- Duplicate review-body stderr buffering note: covered by Comment 4.
+- Earlier AI Agent PR conversation reply for Comments 5-7: already posted.
+- Prior CodeRabbit inline threads for Comments 1-4: resolved/outdated after commit `83fb0f2`.
+- Prior CodeRabbit review-body items for Comments 5-7: handled in the previous review round.
 - CodeRabbit docstring coverage warning: bot pre-merge check noise for this TypeScript repository.
+- CodeRabbit LanguageTool note in the latest review body: writing-style noise, no behavioral fix needed.
 
 Reply prefix: `**[AI Agent]:**`
 
@@ -19,201 +23,135 @@ Reply prefix: `**[AI Agent]:**`
 
 | # | Decision | Severity | Files |
 |---|---|---|---|
-| 1 | decline | low | `src/__tests__/observabilityFormat.test.ts`, `src/daemon/observabilityFormat.ts` |
-| 2 | fix-as-suggested | high | `src/backend/common.ts`, `src/__tests__/backendErrorClassification.test.ts` |
-| 3 | fix-as-suggested | medium | `src/observability.ts`, `src/__tests__/observability.test.ts` |
-| 4 | fix-as-suggested | high | `src/processManager.ts`, `src/__tests__/processManager.test.ts` |
-| 5 | alternative-fix | medium | `src/contract.ts`, `src/__tests__/contract.test.ts` |
-| 6 | fix-as-suggested | medium | `src/__tests__/processManager.test.ts` |
-| 7 | decline | low | none |
+| 8 | alternative-fix | high | `src/processManager.ts`, `src/__tests__/processManager.test.ts` |
 
-## Comment 1 | declined | low
+## Comment 8 | alternative-fix | high
 
 - **Comment Type:** review-inline
-- **File:** `src/__tests__/observabilityFormat.test.ts:34-35`
-- **Comment ID:** `discussion_r3177021041`
-- **Review ID:** `4215348230`
-- **Thread Node ID:** unavailable from fetched payload
+- **File:** `src/processManager.ts:54`
+- **Also Applies To:** `src/processManager.ts:187-191`
+- **Comment ID:** `discussion_r3177107595`
+- **Review ID:** `4215417719`
 - **Author:** `coderabbitai[bot]`
-- **Comment:** Assertion format appears out of sync with formatter output. The comment claims the formatter renders timeout as `execution=...` and latest error as `category "message"` style, and suggests changing expectations from `hard=...` plus parenthesized flags to `execution=...` plus quoted message style.
-- **Independent Assessment:** Incorrect against current branch. `src/daemon/observabilityFormat.ts` currently renders `formatTimeoutPolicy()` with `hard=${...}` and `formatLatestError()` as `${message} (category=... source=... fatal=... retryable=...)`. The existing assertions in `src/__tests__/observabilityFormat.test.ts` match the implementation. Applying the suggested change would make the test wrong unless the formatter contract is intentionally changed elsewhere, which is not requested by the PR.
-- **Decision:** decline
-- **Approach:** No code change. Leave the test and formatter unchanged. Reply that the review comment was checked against the current formatter and is stale/incorrect.
-- **Files To Change:** none
-- **Reply Draft:**
-  > **[AI Agent]:** Checked against the current formatter. `formatTimeoutPolicy()` still renders `hard=...`, and `formatLatestError()` still renders the message followed by parenthesized category/source/fatal/retryable flags, so the existing assertions are correct. No change needed. <!-- agent-orchestrator:pr19:c1 -->
-
-## Comment 2 | fix-as-suggested | high
-
-- **Comment Type:** review-inline
-- **File:** `src/backend/common.ts:203`
-- **Comment ID:** `discussion_r3177021047`
-- **Review ID:** `4215348230`
-- **Thread Node ID:** unavailable from fetched payload
-- **Author:** `coderabbitai[bot]`
-- **Comment:** Tighten fatal regexes before using them for fail-fast classification. Bare matches like `json`, `parse`, `connection`, or `timeout` are too broad and can promote routine stderr such as "parsed JSON successfully" or "retrying connection after timeout" to fatal backend errors.
-- **Independent Assessment:** Valid. `classifyErrorCategory()` currently classifies protocol on bare `parse` or `json`, and backend availability on bare `connection` or `timeout`. Because `classifyBackendError()` sets `fatal: category !== 'unknown'`, these broad matches can kill a healthy run if harmless stderr text includes those words.
-- **Decision:** fix-as-suggested
-- **Approach:** In `src/backend/common.ts`, make protocol and backend availability classification require specific failure phrases or structured context.
-  - Extract normalized `message`, `code`, `type`, and numeric/string `status` separately instead of relying only on one broad haystack.
-  - Keep structured status/code evidence authoritative: `400` or known invalid-request/schema/parse codes can classify as `protocol`; `500`, `502`, `503`, `504`, `ECONN*`, `ETIMEDOUT`, or known service-unavailable codes can classify as `backend_unavailable`.
-  - Replace protocol regex `\b(protocol|schema|malformed|invalid request|bad request|parse|json|400)\b` with phrase-specific checks such as `protocol error`, `schema validation`, `malformed`, `invalid request`, `bad request`, `json parse`, `parse error`, `failed to parse`, `invalid json`, `unexpected token`, or structured `400`.
-  - Replace backend regex `\b(unavailable|connection|network|econn|etimedout|timeout|503|502|500)\b` with explicit failure phrases such as `service unavailable`, `backend unavailable`, `network error`, `connection refused`, `connection reset`, `connection failed`, `connection timed out`, `request timed out`, `timeout exceeded`, `ECONNREFUSED`, `ECONNRESET`, `ETIMEDOUT`, or structured 5xx status.
-  - Ensure informational text like "parsed JSON successfully" and "retrying connection after timeout" remains `category: 'unknown'`, `fatal: false`.
-  - Add focused cases to `src/__tests__/backendErrorClassification.test.ts` for the benign messages above and for still-classified real failures.
-- **Files To Change:** `src/backend/common.ts`, `src/__tests__/backendErrorClassification.test.ts`
-- **Reply Draft:**
-  > **[AI Agent]:** Fixed. The classifier now avoids bare `json`, `parse`, `connection`, and `timeout` matches and requires specific failure phrases or structured status/code evidence before marking protocol or backend-availability errors fatal. Added benign-regression coverage for routine stderr wording. <!-- agent-orchestrator:pr19:c2 -->
-
-## Comment 3 | fix-as-suggested | medium
-
-- **Comment Type:** review-inline
-- **File:** `src/observability.ts:206` and `src/observability.ts:311`
-- **Comment ID:** `discussion_r3177021050`
-- **Review ID:** `4215348230`
-- **Thread Node ID:** unavailable from fetched payload
-- **Author:** `coderabbitai[bot]`
-- **Comment:** Use the freshest timestamp, not just `last_activity_at`. `last_activity_at` is not advanced by every appended event, so sessions and prompt rows can look stale or misordered when newer event data exists.
-- **Independent Assessment:** Valid. `buildSessions()` uses `run.activity.last_activity_at ?? run.activity.last_event_at ...`, and `sessionPrompt()` uses the same fallback order. If `last_activity_at` exists but is older than `last_event_at`, the newer event timestamp is ignored.
-- **Decision:** fix-as-suggested
-- **Approach:** In `src/observability.ts`, add a helper and use it in both affected locations:
-  ```ts
-  function latestObservedAt(run: ObservabilityRun): string {
-    return maxIso([
-      run.activity.last_activity_at,
-      run.activity.last_event_at,
-      run.run.finished_at,
-      run.run.started_at,
-      run.run.created_at,
-    ].filter((value): value is string => value !== null));
-  }
-  ```
-  Then:
-  - Change `const updatedAt = maxIso(group.map(...))` to `const updatedAt = maxIso(group.map(latestObservedAt));`.
-  - Change session prompt `last_activity_at` to `latestObservedAt(run)`.
-  - Add or update an observability test where a run has `last_activity_at` earlier than `last_event_at`, then assert session `updated_at` and prompt `last_activity_at` use the later event timestamp.
-- **Files To Change:** `src/observability.ts`, `src/__tests__/observability.test.ts`
-- **Reply Draft:**
-  > **[AI Agent]:** Fixed. Session `updated_at` and prompt `last_activity_at` now use the freshest observed timestamp across activity, events, and lifecycle times, and coverage pins the case where event activity is newer than persisted `last_activity_at`. <!-- agent-orchestrator:pr19:c3 -->
-
-## Comment 4 | fix-as-suggested | high
-
-- **Comment Type:** review-inline
-- **File:** `src/processManager.ts:160`
-- **Comment ID:** `discussion_r3177021052`
-- **Review ID:** `4215348230`
-- **Thread Node ID:** unavailable from fetched payload
-- **Author:** `coderabbitai[bot]`
-- **Comment:** Buffer stderr by line boundaries before classification, consistent with stdout handling. Raw `data` chunks are not line-aligned, so a fatal error can be split across chunks or multiple messages can be merged before `classifyBackendError()` sees them.
-- **Independent Assessment:** Valid. `stdout` is parsed through `readline.createInterface()` and waits for `stdoutClosed`, but stderr classification currently runs directly on raw `data` chunks. That makes stderr error classification nondeterministic for split writes.
-- **Decision:** fix-as-suggested
-- **Approach:** In `src/processManager.ts`:
-  - Keep `child.stderr.pipe(stderrStream)` so raw stderr artifacts are still complete.
-  - Keep a raw `child.stderr.on('data')` listener only for activity tracking via `recordActivity('stderr')`.
-  - Add `const stderrLines = createInterface({ input: child.stderr, crlfDelay: Infinity });`.
-  - Add `const stderrClosed = new Promise<void>((resolve) => { stderrLines.on('close', resolve); });`.
-  - Move classification from raw `data` chunks into `stderrLines.on('line', (line) => { ... })`.
-  - Trim the line, skip empty lines, classify the full line, call `recordObservedError(error)` when `shouldSurfaceStderrError()` passes, and append an error event with `{ stream: 'stderr', text: line, error }`.
-  - In terminal finalization, await `stderrClosed` along with `stdoutClosed` before awaiting parse and persistence tasks.
-  - Ensure existing fatal stderr behavior still fails fast after a complete line is emitted.
-- **Files To Change:** `src/processManager.ts`, `src/__tests__/processManager.test.ts`
-- **Reply Draft:**
-  > **[AI Agent]:** Fixed. Stderr classification now uses a readline line buffer like stdout, while raw stderr is still persisted to the artifact and raw chunks still count as activity. Finalization waits for stderr line processing before marking the run terminal. <!-- agent-orchestrator:pr19:c4 -->
-
-## Comment 5 | alternative-fix | medium
-
-- **Comment Type:** review-body
-- **File:** `src/contract.ts:52-63`
-- **Comment ID:** review body nitpick in review `4215348230`
-- **Review ID:** `4215348230`
-- **Thread Node ID:** not applicable
-- **Author:** `coderabbitai[bot]`
-- **Comment:** Reconsider the open string union in the exported `RunTerminalReason` type. The runtime schema accepts any non-empty string for forward compatibility, but the exported type then allows misspellings like `backend_fatl_error` in internal code.
-- **Independent Assessment:** Valid concern, but the forward-compatible runtime parsing is intentional for persisted/public run summaries. The fix should preserve runtime compatibility while restoring a closed internal type for values authored by this codebase.
+- **Thread URL:** https://github.com/ralphkrauss/agent-orchestrator/pull/19#discussion_r3177107595
+- **Comment:** Do not suppress persistence failures for the new stream-side activity/error writes. `trackPersistence()` currently converts every rejection into a fulfilled promise, so `Promise.allSettled(persistenceTasks)` cannot detect failed `recordActivity()`, `updateMeta(latest_error)`, or stderr `appendEvent()` writes before terminal finalization.
+- **Independent Assessment:** Valid. The current implementation records stream-side persistence work in `persistenceTasks`, but `trackPersistence()` uses `task.then(() => undefined, () => undefined)`. That prevents unhandled rejections, but it also erases failures. A run can finalize as successful even if the new supervision metadata or stderr error event failed to persist.
 - **Decision:** alternative-fix
-- **Approach:** In `src/contract.ts`:
-  - Introduce a closed schema for internally-authored values:
-    ```ts
-    export const KnownRunTerminalReasonSchema = z.enum([
-      'completed',
-      'worker_failed',
-      'cancelled',
-      'idle_timeout',
-      'execution_timeout',
-      'orphaned',
-      'pre_spawn_failed',
-      'backend_fatal_error',
-      'finalization_failed',
-    ]);
-    export type RunTerminalReason = z.infer<typeof KnownRunTerminalReasonSchema>;
-    export const RunTerminalReasonSchema = KnownRunTerminalReasonSchema.or(z.string().trim().min(1));
-    ```
-  - Keep `RunTerminalReasonSchema` forward-compatible for persisted/public `RunSummarySchema` parsing.
-  - Let internal authoring surfaces continue importing `RunTerminalReason`, which becomes the closed type. This includes `RunTerminalOverride.reason`, `RunStore.markTerminal(... terminal.reason ...)`, and `terminalReasonFromStatus()`.
-  - Add a contract test that `RunTerminalReasonSchema.parse('future_reason')` still succeeds for compatibility. Compile-time narrowing is covered by `tsc`.
-- **Files To Change:** `src/contract.ts`, `src/__tests__/contract.test.ts`
-- **Reply Draft:**
-  > **[AI Agent]:** Fixed with a compatibility-preserving split. Runtime parsing still accepts future terminal reasons from persisted/public summaries, while the exported `RunTerminalReason` type used by internal authoring paths is now closed to the known literals. <!-- agent-orchestrator:pr19:c5 -->
+- **Reason For Alternative:** CodeRabbit's proposed shape is directionally correct, but throwing `persistenceError` before the existing `try` block would reject `managed.completion` directly instead of routing the failure through `failFinalization()`. The fix should preserve the first persistence failure and let the existing finalization failure path mark the run terminal with `terminal_reason: finalization_failed`.
 
-## Comment 6 | fix-as-suggested | medium
+### Required Code Changes
 
-- **Comment Type:** review-body
-- **File:** `src/__tests__/processManager.test.ts:350-384`
-- **Comment ID:** review body nitpick in review `4215354407`
-- **Review ID:** `4215354407`
-- **Thread Node ID:** not applicable
-- **Author:** `coderabbitai[bot]`
-- **Comment:** Add a split-chunk stderr regression. The existing fatal stderr test covers a single `console.error()` write, but production currently classifies raw chunks, so a fatal message emitted across multiple writes would slip past.
-- **Independent Assessment:** Valid and should be handled with Comment 4. The production fix should be line-buffered stderr classification; the regression should prove a fatal stderr line split across writes is still classified after the newline completes.
-- **Decision:** fix-as-suggested
-- **Approach:** In `src/__tests__/processManager.test.ts`, add a focused test or update the current fatal stderr test:
-  - Use a mock worker that writes a fatal message across multiple stderr writes:
-    ```js
-    process.stderr.write('Authentication failed:');
-    setTimeout(() => process.stderr.write(' invalid API key\n'), 10);
-    setInterval(() => {}, 1000);
-    ```
-  - Start the worker through `ProcessManager`.
-  - Race completion against a short timeout, as the current fatal stderr test does.
-  - Assert `meta.status === 'failed'`, `meta.terminal_reason === 'backend_fatal_error'`, `meta.latest_error?.category === 'auth'`, `meta.latest_error?.source === 'stderr'`, `result?.summary === 'Authentication failed: invalid API key'`, and an error event includes the full line.
-  - Keep the existing single-write stderr test if it remains useful, or convert it to the split-write variant to avoid redundant coverage.
-- **Files To Change:** `src/__tests__/processManager.test.ts`
-- **Reply Draft:**
-  > **[AI Agent]:** Fixed. Added a split-write stderr regression that emits a fatal auth message across multiple chunks and verifies the line-buffered classifier still fails the run with the complete stderr line. <!-- agent-orchestrator:pr19:c6 -->
+1. In `src/processManager.ts`, keep tracking every persistence task, but preserve the first rejection instead of erasing it completely.
 
-## Comment 7 | declined | low
+   Recommended shape:
 
-- **Comment Type:** review-body
-- **File:** `src/processManager.ts:52-60`, also `src/processManager.ts:114-117` and `src/processManager.ts:239-246`
-- **Comment ID:** review body additional comment in review `4215354407`
-- **Review ID:** `4215354407`
-- **Thread Node ID:** not applicable
-- **Author:** `coderabbitai[bot]`
-- **Comment:** Verify these meta mutations are serialized per run. `recordActivity()` and `recordObservedError()` enqueue metadata updates without awaiting them while `handleJsonLine()` also updates metadata inline. If `RunStore` is a read-modify-write file store without a per-run queue, busy runs can race and lose `last_activity_*`, `latest_error`, `session_id`, or `observed_model`.
-- **Independent Assessment:** Incorrect for field loss. `RunStore.updateMeta()`, `RunStore.appendEvent()`, `RunStore.markTerminal()`, and `RunStore.recordActivity()` all go through `withRunLock()`. Each metadata updater reads current meta while holding the lock and spreads the current object before changing its own fields. That serializes read-modify-write access and preserves unrelated fields such as `latest_error`, session IDs, and observed model values. No code change is required for the issue described by the comment.
-- **Decision:** decline
-- **Approach:** No code change. If future work wants stricter timestamp monotonicity for activity writes, that can be tracked separately, but it is not necessary to resolve this comment because the current store lock prevents the data-loss race described.
-- **Files To Change:** none
-- **Reply Draft:**
-  > **[AI Agent]:** Checked. These mutations are serialized through `RunStore.withRunLock()`: `recordActivity()` delegates to `updateMeta()`, and `updateMeta()`, `appendEvent()`, and `markTerminal()` all hold the per-run lock while reading and writing. The updaters spread current meta under that lock, so unrelated fields are not lost. No code change needed for this one. <!-- agent-orchestrator:pr19:c7 -->
+   ```ts
+   const persistenceTasks: Promise<void>[] = [];
+   let persistenceFailed = false;
+   let persistenceError: unknown;
 
-## Implementation Plan
+   const trackPersistence = (task: Promise<unknown>) => {
+     persistenceTasks.push(task.then(
+       () => undefined,
+       (error) => {
+         if (!persistenceFailed) {
+           persistenceFailed = true;
+           persistenceError = error;
+         }
+       },
+     ));
+   };
+   ```
 
-1. Update `src/backend/common.ts` classification to remove broad fatal matches and add backend error classification tests.
-2. Update `src/processManager.ts` to classify stderr by line with `readline`, wait for stderr line close before finalization, and keep raw stderr artifact/activity behavior.
-3. Add the split-chunk stderr regression in `src/__tests__/processManager.test.ts`.
-4. Update `src/observability.ts` to use a `latestObservedAt()` helper for session `updated_at` and prompt `last_activity_at`, then add focused observability coverage.
-5. Split known/internal terminal reason typing from forward-compatible runtime parsing in `src/contract.ts`, then add a compatibility parse test.
-6. Leave Comment 1 and Comment 7 unchanged, with the reply drafts above.
-7. Run:
-   - `git diff --check`
-   - `node scripts/sync-ai-workspace.mjs --check`
-   - `pnpm build`
-   - `pnpm test`
-   - `pnpm verify` if release-quality verification is needed and dependencies are installed
+   Use a boolean sentinel rather than `persistenceError ??=` so even a promise rejected with `undefined` is still treated as a failure.
 
-## Reply And Resolve Notes
+2. Keep awaiting all stream, parse, and persistence work before terminal finalization:
 
-- Do not post any replies until the fixes are committed and pushed, and the user explicitly approves posting GitHub replies.
-- Resolve inline threads for Comments 1 through 4 after replies are posted. Comment 1 can be resolved as declined/incorrect if the maintainer agrees.
-- Comment 5, Comment 6, and Comment 7 are review-body items, so there may be no thread to resolve; post a review or PR conversation reply only if requested.
+   ```ts
+   await stdoutClosed;
+   await stderrClosed;
+   await Promise.allSettled(parseTasks);
+   await Promise.allSettled(persistenceTasks);
+   ```
+
+3. Move the persistence failure check inside the existing finalization `try` block:
+
+   ```ts
+   try {
+     if (persistenceFailed) throw persistenceError;
+     return await this.finalizeRun(/* existing args */);
+   } catch (error) {
+     return this.failFinalization(runId, error, Array.from(filesFromEvents), commandsRun);
+   }
+   ```
+
+   This makes activity/latest-error/stderr-event persistence failures fail the run through the existing `finalization_failed` path instead of silently succeeding or rejecting `managed.completion`.
+
+4. Do not change `parseTasks` behavior in this fix. The review comment is specifically about persistence of the new supervision metadata/events.
+
+### Required Test Coverage
+
+Add a focused regression in `src/__tests__/processManager.test.ts`.
+
+Suggested shape:
+
+- Add a test `RunStore` subclass near `ThrowingTerminalStore` that throws once from `recordActivity()` for a stream-side source such as `stderr` or `stdout`.
+- Start a mock worker that otherwise exits successfully and emits a valid result event.
+- Ensure the worker produces the stream-side activity source that triggers the failing `recordActivity()` write.
+- Await `managed.completion`.
+- Assert:
+  - `meta.status === 'failed'`
+  - `meta.terminal_reason === 'finalization_failed'`
+  - `meta.latest_error?.source === 'finalization'`
+  - `meta.latest_error?.message === 'run finalization failed'`
+  - `meta.latest_error?.context?.error` includes the injected persistence failure message
+  - `meta.result?.summary === 'run finalization failed'`
+
+If using `stderr`, make the emitted stderr line benign so the test isolates persistence failure handling instead of fatal stderr classification.
+
+### Files To Change
+
+- `src/processManager.ts`
+- `src/__tests__/processManager.test.ts`
+
+### Verification
+
+Run the narrow checks first:
+
+```text
+git diff --check
+node scripts/sync-ai-workspace.mjs --check
+pnpm test -- --test-name-pattern persistence
+```
+
+Then run broader checks if dependencies are installed:
+
+```text
+pnpm build
+pnpm test
+pnpm verify
+```
+
+If `node_modules` is still missing locally, record that `pnpm build`/`pnpm test` are blocked by the missing install and include any checks that did run.
+
+### Reply Draft
+
+> **[AI Agent]:** Fixed. Persistence tracking now preserves the first failed activity/error/event write and routes it through the existing finalization failure path before terminal marking, so the run cannot silently complete after dropping supervision metadata. Added regression coverage for a failed stream-side activity persistence write. <!-- agent-orchestrator:pr19:c8 -->
+
+## Previously Handled Review Items
+
+These were mapped and handled before the latest CodeRabbit review. They are retained here only to avoid reopening already-resolved feedback.
+
+| # | Prior Decision | Current State | Notes |
+|---|---|---|---|
+| 1 | decline | resolved | Formatter assertion comment was stale; CodeRabbit later confirmed the clarification. |
+| 2 | fix-as-suggested | resolved/outdated | Fatal backend classifier was tightened and structured suffix cases were added. |
+| 3 | fix-as-suggested | resolved/outdated | Observability sessions/prompts now use the freshest observed timestamp. |
+| 4 | fix-as-suggested | resolved/outdated | Stderr classification now uses complete lines and finalization waits for stderr processing. |
+| 5 | alternative-fix | handled | Runtime parsing remains forward-compatible while internal terminal reasons are closed. |
+| 6 | fix-as-suggested | handled | Split-chunk fatal stderr regression was added. |
+| 7 | decline | handled | RunStore per-run locking already prevents the metadata field-loss race described. |
+
+## Developer Handoff
+
+Implement only Comment 8 in this round. Do not post PR replies or resolve GitHub threads until the fix is committed, pushed, and the maintainer approves posting replies.

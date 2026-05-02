@@ -8,7 +8,7 @@ import { ClaudeBackend } from '../backend/claude.js';
 import { CodexBackend } from '../backend/codex.js';
 import { prepareWorkerSpawn, ProcessManager, terminateProcessTree } from '../processManager.js';
 import { RunStore } from '../runStore.js';
-import type { RunMeta, TerminalRunStatus, WorkerResult } from '../contract.js';
+import type { RunActivitySource, RunMeta, TerminalRunStatus, WorkerResult } from '../contract.js';
 
 class ThrowingTerminalStore extends RunStore {
   override async markTerminal(
@@ -22,6 +22,18 @@ class ThrowingTerminalStore extends RunStore {
     void errors;
     void result;
     throw new Error('terminal write failed');
+  }
+}
+
+class ThrowingStreamActivityStore extends RunStore {
+  private failed = false;
+
+  override async recordActivity(runId: string, source: RunActivitySource, at = new Date()): Promise<RunMeta> {
+    if (!this.failed && source === 'error') {
+      this.failed = true;
+      throw new Error('stream activity persistence failed');
+    }
+    return super.recordActivity(runId, source, at);
   }
 }
 
@@ -185,6 +197,42 @@ process.stdin.on('end', () => {
     assert.equal(result?.status, 'completed');
     assert.equal(result?.summary, 'done');
     assert.deepStrictEqual(result?.errors, []);
+  });
+
+  it('routes stream-side persistence failures through finalization failure', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-process-'));
+    const cli = join(root, 'worker.js');
+    await writeFile(cli, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  console.error('nonfatal worker error count: 1');
+  console.log(JSON.stringify({ type: 'thread.started', thread_id: 'session-1' }));
+  console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done', session_id: 'session-1' }));
+  process.exit(0);
+});
+`);
+    await chmod(cli, 0o755);
+
+    const store = new ThrowingStreamActivityStore(root);
+    const run = await store.createRun({ backend: 'codex', cwd: root });
+    const manager = new ProcessManager(store);
+    const managed = await manager.start(run.run_id, new CodexBackend(), {
+      command: cli,
+      args: [],
+      cwd: root,
+      stdinPayload: 'finish',
+    });
+
+    const meta = await managed.completion;
+    const result = await store.loadResult(run.run_id);
+    assert.equal(meta.status, 'failed');
+    assert.equal(meta.terminal_reason, 'finalization_failed');
+    assert.equal(meta.latest_error?.source, 'finalization');
+    assert.equal(meta.latest_error?.message, 'run finalization failed');
+    assert.match(String(meta.latest_error?.context?.error), /stream activity persistence failed/);
+    assert.equal(result?.status, 'failed');
+    assert.equal(result?.summary, 'run finalization failed');
+    assert.equal(result?.errors[0]?.message, 'run finalization failed');
   });
 
   it('persists timeout latest_error from terminal overrides', async () => {
