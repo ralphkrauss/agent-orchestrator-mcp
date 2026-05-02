@@ -2,7 +2,7 @@
 
 Branch: `2-add-windows-support`
 Created: 2026-05-02
-Total comments: 5 | Fixed: 5 | Deferred: 0 | Declined: 0 | Escalated: 0
+Total comments: 6 | Fixed: 6 | Deferred: 0 | Declined: 0 | Escalated: 0
 
 ## Comment 1 | fixed | minor
 
@@ -75,9 +75,24 @@ Total comments: 5 | Fixed: 5 | Deferred: 0 | Declined: 0 | Escalated: 0
 - **Reply Draft:**
   > **[AI Agent]:** Fixed. Added a Windows-only IPC round-trip smoke that exercises the real named-pipe endpoint on native Windows runners; it is skipped on non-Windows hosts.
 
+## Comment 6 | fixed | minor
+
+- **Comment Type:** review-body
+- **File:** `src/__tests__/diagnostics.test.ts:35`
+- **Comment ID:** review body `4214688540`
+- **Author:** `coderabbitai[bot]`
+- **Comment:** Restore `PATH` with `restoreEnv()` too, otherwise an originally unset `PATH` is restored as the string `undefined`.
+- **Independent Assessment:** Valid. `process.env` assignments stringify `undefined`, so the existing direct assignment does not faithfully restore an originally unset environment variable.
+- **Decision:** fix-as-suggested
+- **Approach:** Use `restoreEnv('PATH', originalPath)` in diagnostics test cleanup, matching the other environment variables in the same `afterEach`.
+- **Files To Change:** `src/__tests__/diagnostics.test.ts`
+- **Reply Draft:**
+  > **[AI Agent]:** Fixed. Diagnostics test cleanup now restores `PATH` through the shared `restoreEnv()` helper.
+
 ## Verification
 
 - `git diff --check`: pass
+- CI failure in workflow run `25246936259`: diagnosed as the simulated Windows diagnostics test writing lowercase `.cmd` shims while using uppercase `.CMD` in `PATHEXT` on case-sensitive Linux runners; fixed by aligning the simulated extension with the generated shim names.
 - Conflict marker scan across `src` and `plans/2-add-windows-support`: pass
 - Native Windows IPC smoke: added as a Windows-only test; not executed in this Linux workspace
-- `pnpm build`: blocked because `node_modules` is absent and `tsc` is not installed locally (`sh: 1: tsc: not found`)
+- `pnpm build` / `pnpm test`: not rerun locally because `node_modules` is absent and repository instructions require explicit approval before installing packages.

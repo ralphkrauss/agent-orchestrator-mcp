@@ -32,7 +32,7 @@ describe('backend diagnostics', () => {
   });
 
   afterEach(() => {
-    process.env.PATH = originalPath;
+    restoreEnv('PATH', originalPath);
     restoreEnv('OPENAI_API_KEY', originalOpenAiKey);
     restoreEnv('CODEX_API_KEY', originalCodexKey);
     restoreEnv('ANTHROPIC_API_KEY', originalAnthropicKey);
@@ -82,7 +82,7 @@ describe('backend diagnostics', () => {
       ['--help', 'Usage: claude -p --output-format stream-json --resume --model <session>'],
     ]);
     process.env.PATH = bin;
-    process.env.PATHEXT = '.CMD';
+    process.env.PATHEXT = '.cmd';
     if (process.platform !== 'win32') {
       const commandProcessor = join(root, 'cmd-proxy.js');
       await writeWindowsCommandProcessor(commandProcessor);
