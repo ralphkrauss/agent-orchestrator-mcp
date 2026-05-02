@@ -153,4 +153,42 @@ process.stdin.on('end', () => {
     assert.equal(meta.model_source, 'backend_default');
     assert.deepStrictEqual(meta.worker_invocation, { command: cli, args: [] });
   });
+
+  it('includes parsed worker error events in failed results without final result events', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-process-'));
+    const cli = join(root, 'worker.js');
+    await writeFile(cli, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({ type: 'thread.started', thread_id: 'session-1' }));
+  console.log(JSON.stringify({
+    type: 'error',
+    status: 400,
+    error: {
+      type: 'invalid_request_error',
+      message: "The 'openai/gpt-5.5' model is not supported when using Codex with a ChatGPT account."
+    }
+  }));
+  process.exit(1);
+});
+`);
+    await chmod(cli, 0o755);
+
+    const store = new RunStore(root);
+    const run = await store.createRun({ backend: 'codex', cwd: root });
+    const manager = new ProcessManager(store);
+    const managed = await manager.start(run.run_id, new CodexBackend(), {
+      command: cli,
+      args: [],
+      cwd: root,
+      stdinPayload: 'finish',
+    });
+
+    await managed.completion;
+    const result = await store.loadResult(run.run_id);
+    assert.equal(result?.status, 'failed');
+    assert.equal(result?.summary, "The 'openai/gpt-5.5' model is not supported when using Codex with a ChatGPT account.");
+    assert.ok(result?.errors.some((error) => error.message.includes('not supported when using Codex with a ChatGPT account')));
+    assert.ok(result?.errors.some((error) => error.message === 'worker result event missing'));
+  });
 });

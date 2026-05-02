@@ -18,8 +18,15 @@ describe('MCP tool registration', () => {
 
   it('exposes follow-up metadata and observability snapshot arguments', () => {
     const start = schemaFor('start_run');
+    assert.equal(Object.hasOwn(start.properties, 'route'), false);
+    assert.equal(Object.hasOwn(start.properties, 'profile'), true);
+    assert.equal(Object.hasOwn(start.properties, 'profiles_file'), true);
     assert.equal(Object.hasOwn(start.properties, 'reasoning_effort'), true);
     assert.equal(Object.hasOwn(start.properties, 'service_tier'), true);
+    assert.deepStrictEqual(start.required, ['prompt', 'cwd']);
+
+    const profiles = schemaFor('list_worker_profiles');
+    assert.equal(Object.hasOwn(profiles.properties, 'profiles_file'), true);
 
     const followup = schemaFor('send_followup');
     assert.equal(Object.hasOwn(followup.properties, 'metadata'), true);

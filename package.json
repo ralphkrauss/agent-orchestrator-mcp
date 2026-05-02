@@ -14,7 +14,8 @@
   },
   "bin": {
     "agent-orchestrator-mcp": "dist/cli.js",
-    "agent-orchestrator-mcp-daemon": "dist/daemonCli.js"
+    "agent-orchestrator-mcp-daemon": "dist/daemonCli.js",
+    "agent-orchestrator-opencode": "dist/opencodeCli.js"
   },
   "scripts": {
     "build": "tsc",

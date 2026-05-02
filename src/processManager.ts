@@ -72,6 +72,7 @@ export class ProcessManager {
     let sessionId: string | undefined;
     const filesFromEvents = new Set<string>();
     const commandsRun: string[] = [];
+    const observedErrors: { message: string; context?: Record<string, unknown> }[] = [];
     let terminalOverride: Extract<RunStatus, 'cancelled' | 'timed_out'> | undefined;
     let killTimer: NodeJS.Timeout | null = null;
     const parseTasks: Promise<void>[] = [];
@@ -86,12 +87,14 @@ export class ProcessManager {
         setResultEvent: (event) => { resultEvent = event; },
         addFile: (path) => filesFromEvents.add(path),
         addCommand: (command) => commandsRun.push(command),
+        addError: (error) => observedErrors.push(error),
       }));
     });
 
     child.stderr.on('data', (chunk: Buffer) => {
       const text = chunk.toString('utf8');
       if (text.toLowerCase().includes('error')) {
+        observedErrors.push({ message: text.trim(), context: { stream: 'stderr' } });
         void this.store.appendEvent(runId, { type: 'error', payload: { stream: 'stderr', text } });
       }
     });
@@ -126,6 +129,7 @@ export class ProcessManager {
               sessionId,
               Array.from(filesFromEvents),
               commandsRun,
+              observedErrors,
               terminalOverride,
             );
           } catch (error) {
@@ -147,6 +151,7 @@ export class ProcessManager {
       setResultEvent(event: BackendResultEvent): void;
       addFile(path: string): void;
       addCommand(command: string): void;
+      addError(error: { message: string; context?: Record<string, unknown> }): void;
     },
   ): Promise<void> {
     const trimmed = line.trim();
@@ -174,6 +179,7 @@ export class ProcessManager {
     if (parsed.resultEvent) sinks.setResultEvent(parsed.resultEvent);
     for (const file of parsed.filesChanged) sinks.addFile(file);
     for (const command of parsed.commandsRun) sinks.addCommand(command);
+    for (const error of parsed.errors) sinks.addError(error);
     for (const event of parsed.events) {
       await this.store.appendEvent(runId, event);
     }
@@ -213,6 +219,7 @@ export class ProcessManager {
     sessionId: string | undefined,
     filesFromEvents: string[],
     commandsRun: string[],
+    observedErrors: { message: string; context?: Record<string, unknown> }[],
     terminalOverride: Extract<RunStatus, 'cancelled' | 'timed_out'> | undefined,
   ): Promise<RunMeta> {
     const meta = await this.store.loadMeta(runId);
@@ -222,7 +229,10 @@ export class ProcessManager {
       : [];
     const errors = terminalOverride
       ? [{ message: terminalOverride === 'timed_out' ? 'execution timeout exceeded' : 'cancelled by user' }]
-      : exitCode === 0 ? [] : [{ message: 'worker process exited unsuccessfully', context: { exit_code: exitCode, signal } }];
+      : [
+          ...(exitCode === 0 ? [] : [{ message: 'worker process exited unsuccessfully', context: { exit_code: exitCode, signal } }]),
+          ...dedupeErrors(observedErrors),
+        ];
 
     let finalized = backend.finalizeResult({
       runStatusOverride: terminalOverride,
@@ -340,6 +350,18 @@ export function terminateProcessTree(
 
 function spawnTaskkillProcess(command: string, args: string[], options: { stdio: 'ignore'; windowsHide: true }): ChildProcess {
   return spawn(command, args, options);
+}
+
+function dedupeErrors(errors: { message: string; context?: Record<string, unknown> }[]): { message: string; context?: Record<string, unknown> }[] {
+  const seen = new Set<string>();
+  const unique: { message: string; context?: Record<string, unknown> }[] = [];
+  for (const error of errors) {
+    const key = `${error.message}\0${JSON.stringify(error.context ?? {})}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(error);
+  }
+  return unique;
 }
 
 export function prepareWorkerSpawn(
