@@ -232,11 +232,11 @@ export class ProcessManager {
       : [];
     const errors = terminalOverride
       ? [{ message: terminalOverride === 'timed_out' ? 'execution timeout exceeded' : 'cancelled by user' }]
-      : exitCode === 0
-        ? dedupeErrors(parsedErrors)
+      : exitCode === 0 && resultEvent
+        ? []
         : [
-            { message: 'worker process exited unsuccessfully', context: { exit_code: exitCode, signal } },
-            ...dedupeErrors([...parsedErrors, ...stderrErrors]),
+            ...(exitCode === 0 ? [] : [{ message: 'worker process exited unsuccessfully', context: { exit_code: exitCode, signal } }]),
+            ...dedupeErrors(exitCode === 0 ? parsedErrors : [...parsedErrors, ...stderrErrors]),
           ];
 
     let finalized = backend.finalizeResult({

@@ -184,10 +184,9 @@ describe('agent orchestrator integration with mock CLIs', () => {
     const followupId = followup.ok ? (followup as unknown as { run_id: string }).run_id : '';
     await service.waitForRun({ run_id: followupId, wait_seconds: 5 });
     const followupStatus = await service.getRunStatus({ run_id: followupId });
-    assert.equal(
-      followupStatus.ok && Object.hasOwn((followupStatus as unknown as { run_summary: { metadata: Record<string, unknown> } }).run_summary.metadata, 'worker_profile'),
-      false,
-    );
+    assert.equal(followupStatus.ok, true);
+    const followupMetadata = (followupStatus as unknown as { run_summary: { metadata: Record<string, unknown> } }).run_summary.metadata;
+    assert.equal(Object.hasOwn(followupMetadata, 'worker_profile'), false);
 
     const explicitMetadata = await service.sendFollowup({
       run_id: secondId,
@@ -198,8 +197,9 @@ describe('agent orchestrator integration with mock CLIs', () => {
     const explicitMetadataId = explicitMetadata.ok ? (explicitMetadata as unknown as { run_id: string }).run_id : '';
     await service.waitForRun({ run_id: explicitMetadataId, wait_seconds: 5 });
     const explicitMetadataStatus = await service.getRunStatus({ run_id: explicitMetadataId });
+    assert.equal(explicitMetadataStatus.ok, true);
     assert.deepStrictEqual(
-      explicitMetadataStatus.ok && (explicitMetadataStatus as unknown as { run_summary: { metadata: { worker_profile: unknown } } }).run_summary.metadata.worker_profile,
+      (explicitMetadataStatus as unknown as { run_summary: { metadata: { worker_profile: unknown } } }).run_summary.metadata.worker_profile,
       { mode: 'explicit-child' },
     );
 

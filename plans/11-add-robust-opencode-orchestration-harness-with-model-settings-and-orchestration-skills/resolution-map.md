@@ -1,197 +1,95 @@
-# PR #15 Resolution Map
+# PR #15 Resolution Map - Round 2
 
 Branch: `11-add-robust-opencode-orchestration-harness-with-model-settings-and-orchestration-skills`
 Created: 2026-05-02
 PR: https://github.com/ralphkrauss/agent-orchestrator/pull/15
-Head reviewed: `852222b13e3a2bd93db3fd3f0af9a87ae113cdcf`
+Head reviewed: `6207e65eede5ca71b1a8b24ec2dcd0571430eb0e`
 
-Total actionable review items: 7
-CI failures: 1 shared workflow issue across Node 22 and Node 24
-Skipped: 3 resolved or outdated inline threads, 1 informational CodeRabbit summary conversation comment
+New actionable review items: 4
+To fix: 4 | To defer: 0 | To decline: 0 | To escalate: 0
+CI status: green on Node 22 and Node 24 for workflow run https://github.com/ralphkrauss/agent-orchestrator/actions/runs/25256885513
 
-## Skipped Or Already Handled
+## Previously Handled
 
-- `src/opencode/capabilities.ts` Claude `xhigh` matching comment is resolved/outdated on GitHub. A newer unresolved review-body item for the shared `src/backend/claudeValidation.ts` helper is tracked below as Item 7.
-- `src/opencode/config.ts` read-only bash allowlist comment is resolved/outdated because bash is now denied outright.
-- `src/opencode/launcher.ts` `--manifest`/`--profiles-file` alias conflict comment is resolved/outdated because `--manifest` now feeds the same profiles path.
-- The CodeRabbit walkthrough conversation comment is informational. Its "Docstring Coverage" warning is a CodeRabbit pre-merge check, not the failing GitHub Actions build check. I did not include it as a required fix because this TypeScript codebase does not currently enforce docstring coverage.
+- Exact manifest-only `external_directory` for the profiles manifest was fixed in `6207e65`.
+- Skill discovery now ignores only missing `SKILL.md` and surfaces unreadable/broken files.
+- Follow-up runs no longer inherit `worker_profile` provenance unless child metadata explicitly supplies it.
+- Heuristic stderr text such as `0 errors` is no longer promoted into successful run errors.
+- MCP `start_run` schema now advertises direct-mode versus profile-mode constraints.
+- Claude model effort validation now uses exact normalized direct model ids for `xhigh` and known-model checks, preserving `claude-opus-4-7[1m]`.
+- Local OpenCode session ids/log names were redacted from the plan.
+- CI tarball smoke now uses the current package bins: `agent-orchestrator`, `agent-orchestrator-daemon`, and `agent-orchestrator-opencode`.
 
 ## Summary
 
 | Item | Status | Severity | Decision | Files |
 |---|---|---|---|---|
-| 1 | to-fix | Major | fix-as-suggested | `src/opencode/config.ts`, `src/__tests__/opencodeHarness.test.ts` |
-| 2 | to-fix | Minor | fix-as-suggested | `src/opencode/skills.ts`, `src/__tests__/opencodeHarness.test.ts` |
-| 3 | to-fix | Major | fix-as-suggested | `src/orchestratorService.ts`, `src/__tests__/integration/orchestrator.test.ts` |
-| 4 | to-fix | Major | alternative-fix | `src/processManager.ts`, `src/__tests__/processManager.test.ts` |
-| 5 | to-fix | Major | fix-as-suggested | `plans/.../plans/11-opencode-orchestration-harness.md` |
-| 6 | to-fix | Major | fix-as-suggested | `src/mcpTools.ts`, `src/__tests__/mcpTools.test.ts` |
-| 7 | to-fix | Minor | fix-as-suggested | `src/backend/claudeValidation.ts`, `src/__tests__/opencodeCapabilities.test.ts`, `src/__tests__/integration/orchestrator.test.ts` |
-| CI | to-fix | High | fix workflow smoke | `.github/workflows/ci.yml` |
+| 1 | to-fix | Minor | fix-as-suggested | `src/__tests__/integration/orchestrator.test.ts` |
+| 2 | to-fix | Major | alternative-fix | `src/backend/claudeValidation.ts`, `src/__tests__/opencodeCapabilities.test.ts` |
+| 3 | to-fix | Major | alternative-fix | `src/opencode/config.ts`, `src/__tests__/opencodeHarness.test.ts` |
+| 4 | to-fix | Major | fix-as-suggested | `src/processManager.ts`, `src/__tests__/processManager.test.ts` |
 
-## Item 1 | to-fix | Major
+## Item 1 | to-fix | Minor
 
 - **Comment Type:** review-inline
-- **File:** `src/opencode/config.ts:104`
-- **Comment URL:** https://github.com/ralphkrauss/agent-orchestrator/pull/15#discussion_r3176779692
+- **File:** `src/__tests__/integration/orchestrator.test.ts:190`
+- **Comment URL:** https://github.com/ralphkrauss/agent-orchestrator/pull/15#discussion_r3176937644
 - **Author:** `coderabbitai[bot]`
-- **Comment:** `external_directory` currently allows `join(dirname(manifestPath), '*')`, granting the supervisor access to every direct child file beside the profiles manifest instead of just the manifest.
-- **Independent Assessment:** Valid. `profileManifestExternalDirectoryPermission()` currently emits `'*': 'deny'`, the exact manifest path, and a sibling wildcard. The launcher already creates the manifest directory before a non-print launch, so the wildcard is broader than needed for setup.
+- **Comment:** Prevent a false pass when follow-up status retrieval fails. The current assertion evaluates `followupStatus.ok && hasWorkerProfile` and compares it to `false`, so a failed status lookup still passes.
+- **Independent Assessment:** Valid. Lines 186-190 currently check `followupStatus.ok && Object.hasOwn(...) === false`. If `getRunStatus()` returns `{ ok: false }`, the left side becomes `false` and the test passes without proving anything about child metadata.
 - **Decision:** fix-as-suggested
-- **Approach:** Remove the sibling wildcard from `profileManifestExternalDirectoryPermission()`. Keep only `'*': 'deny'` and `[manifestPath]: 'allow'`. Update all harness config tests that currently expect the directory wildcard for repo-local and user-level manifests.
-- **Files To Change:** `src/opencode/config.ts`, `src/__tests__/opencodeHarness.test.ts`
+- **Approach:** Assert `followupStatus.ok` first, then read metadata only from the success branch and assert `worker_profile` is absent. Keep the explicit child metadata case below it as-is, except consider applying the same `ok`-first style there if touching the block.
+- **Files To Change:** `src/__tests__/integration/orchestrator.test.ts`
 - **Reply Draft:**
-  > **[AI Agent]:** Fixed. The OpenCode supervisor external-directory permission now allows only the exact profiles manifest path, and the harness tests assert that sibling files are not granted. <!-- agent-orchestrator:pr15:c1 -->
+  > **[AI Agent]:** Fixed. The follow-up metadata regression test now asserts status retrieval succeeded before checking that `worker_profile` was not inherited. <!-- agent-orchestrator:pr15:r2:c1 -->
 
-## Item 2 | to-fix | Minor
+## Item 2 | to-fix | Major
 
 - **Comment Type:** review-inline
-- **File:** `src/opencode/skills.ts:40`
-- **Comment URL:** https://github.com/ralphkrauss/agent-orchestrator/pull/15#discussion_r3176779696
+- **File:** `src/backend/claudeValidation.ts:20`
+- **Comment URL:** https://github.com/ralphkrauss/agent-orchestrator/pull/15#discussion_r3176937648
 - **Author:** `coderabbitai[bot]`
-- **Comment:** Only ignore a missing `SKILL.md`; permission or I/O failures should not silently remove a skill from discovery.
-- **Independent Assessment:** Valid. `readProjectSkillNames()` currently catches every `access()` failure and ignores it. That hides unreadable or otherwise broken `SKILL.md` files.
-- **Decision:** fix-as-suggested
-- **Approach:** In the inner catch, inspect `error.code`. Continue only for `ENOENT`; rethrow everything else. Keep the outer `readdir()` `ENOENT` handling so a missing skill root still returns an empty list. Add a focused test that a candidate directory without `SKILL.md` is ignored, and, if stable on CI, one that an unreadable `SKILL.md` rejects instead of disappearing.
-- **Files To Change:** `src/opencode/skills.ts`, `src/__tests__/opencodeHarness.test.ts`
+- **Comment:** Reject unsupported Claude `reasoning_effort` values. The helper currently rejects only `none` and `minimal`, so an arbitrary string can pass when a model is explicit.
+- **Independent Assessment:** Valid as shared-helper hardening. Profile validation currently rejects unsupported efforts through the capability catalog before calling this helper, and direct `start_run` is also schema-constrained, but `validateClaudeModelAndEffort()` accepts `string | null | undefined` and should enforce its own documented effort set. That keeps future callers from bypassing the contract accidentally.
+- **Decision:** alternative-fix
+- **Approach:** Normalize effort once with `const effort = reasoningEffort?.trim().toLowerCase() ?? null;`. Add a module-level `knownClaudeReasoningEfforts` set containing `low`, `medium`, `high`, `xhigh`, and `max`. If `effort` is present and not in the set, return the existing "must be one of low, medium, high, xhigh, or max" message. Use `effort` for all subsequent checks instead of the raw `reasoningEffort`. Preserve exact direct model checks and `[1m]` normalization from the previous fix. Add a focused regression test that a Claude profile or helper path rejects `reasoning_effort: "ultra"` with an explicit valid model.
+- **Files To Change:** `src/backend/claudeValidation.ts`, `src/__tests__/opencodeCapabilities.test.ts`
 - **Reply Draft:**
-  > **[AI Agent]:** Fixed. Skill discovery now ignores only missing `SKILL.md` files and surfaces permission or I/O failures instead of silently hiding broken skills. <!-- agent-orchestrator:pr15:c2 -->
+  > **[AI Agent]:** Fixed. The shared Claude model/effort validator now normalizes effort values and rejects anything outside `low`, `medium`, `high`, `xhigh`, and `max`, even when a direct model id is present. <!-- agent-orchestrator:pr15:r2:c2 -->
 
 ## Item 3 | to-fix | Major
 
 - **Comment Type:** review-inline
-- **File:** `src/orchestratorService.ts:242` and follow-up inheritance around `src/orchestratorService.ts:306`
-- **Comment URL:** https://github.com/ralphkrauss/agent-orchestrator/pull/15#discussion_r3176779697
-- **Review Body Duplicate:** review `4215171821`
+- **File:** `src/opencode/config.ts:83`
+- **Comment URL:** https://github.com/ralphkrauss/agent-orchestrator/pull/15#discussion_r3176937649
 - **Author:** `coderabbitai[bot]`
-- **Comment:** Do not persist live-profile provenance in generic metadata that follow-up runs inherit. A profile-started parent can create a child that still claims the original profile even when the child was not profile-resolved.
-- **Independent Assessment:** Valid. `resolveStartRunTarget()` stores `worker_profile` inside `metadata`, and `sendFollowup()` clones `parent.meta.metadata` verbatim before overlaying child metadata. Follow-ups do not run profile resolution, so inherited `worker_profile` is misleading.
-- **Decision:** fix-as-suggested
-- **Approach:** Strip `worker_profile` from inherited metadata in `sendFollowup()` before merging child metadata. Suggested local shape:
-  ```ts
-  const { worker_profile: _workerProfile, ...inheritedMetadata } = parent.meta.metadata ?? {};
-  const metadata = { ...inheritedMetadata, ...parsed.data.metadata };
-  ```
-  Keep `worker_profile` on runs started through `start_run` profile mode. Add or extend the live-profile integration test to start a profile-mode parent, send a follow-up with and without explicit overrides, and assert the child metadata does not include inherited `worker_profile` unless the user explicitly supplies one in child metadata.
-- **Files To Change:** `src/orchestratorService.ts`, `src/__tests__/integration/orchestrator.test.ts`
+- **Comment:** Allow out-of-workspace orchestration skills in `external_directory`. `edit` allows skill files under `skillRoot`, but `external_directory` now allows only the manifest, so shared skill roots outside `targetCwd` remain blocked.
+- **Independent Assessment:** Valid. `setupEditPermission()` includes `join(skillRoot, 'orchestrate-*', 'SKILL.md')`, but `profileManifestExternalDirectoryPermission()` returns only `'*': 'deny'` and `[manifestPath]: 'allow'`. When `skillRoot` is outside the workspace, OpenCode needs an `external_directory` allow for the same skill file pattern before the edit rule can be useful.
+- **Decision:** alternative-fix
+- **Approach:** Replace `profileManifestExternalDirectoryPermission(manifestPath)` with a broader but still narrow helper, for example `externalDirectoryPermission(targetCwd, skillRoot, manifestPath)`. It should always return `'*': 'deny'` and the exact `[manifestPath]: 'allow'`. It should add exactly `join(skillRoot, 'orchestrate-*', 'SKILL.md'): 'allow'` only when that skill pattern is outside `targetCwd` according to the existing `relative(targetCwd, pattern)` logic. Do not add a directory wildcard or sibling manifest wildcard. Add harness tests for:
+  - repo-local/default skill root keeps only the exact manifest in `external_directory`;
+  - out-of-workspace `skillRoot` adds only the exact `orchestrate-*/SKILL.md` pattern plus the manifest.
+- **Files To Change:** `src/opencode/config.ts`, `src/__tests__/opencodeHarness.test.ts`
 - **Reply Draft:**
-  > **[AI Agent]:** Fixed. Follow-up runs no longer inherit profile provenance from the parent metadata; profile provenance is attached only to runs actually resolved from a live profile. <!-- agent-orchestrator:pr15:c3 -->
+  > **[AI Agent]:** Fixed. `external_directory` still grants only the exact profiles manifest by default, and now also grants the exact out-of-workspace `orchestrate-*/SKILL.md` pattern when a shared skill root is configured outside the workspace. <!-- agent-orchestrator:pr15:r2:c3 -->
 
 ## Item 4 | to-fix | Major
 
 - **Comment Type:** review-inline
-- **File:** `src/processManager.ts:99` and `src/processManager.ts:230`
-- **Comment URL:** https://github.com/ralphkrauss/agent-orchestrator/pull/15#discussion_r3176779700
+- **File:** `src/processManager.ts:240`
+- **Comment URL:** https://github.com/ralphkrauss/agent-orchestrator/pull/15#discussion_r3176937652
 - **Author:** `coderabbitai[bot]`
-- **Comment:** Do not promote arbitrary stderr chunks containing `"error"` into final run errors when the worker exits successfully and emits a valid result.
-- **Independent Assessment:** Valid. The current `observedErrors` array mixes backend-classified parsed errors and heuristic stderr text. `finalizeRun()` passes deduped `observedErrors` into backend finalization even when `exitCode === 0`, so benign text such as `0 errors` can make a successful result look errored.
-- **Decision:** alternative-fix
-- **Approach:** Split backend-classified errors from heuristic stderr errors. Keep parsed backend errors in the finalization context because the backend classified them. Keep stderr logging/events, but only add heuristic stderr errors to the final result when the process fails or is otherwise terminal-failed. One implementation shape:
-  - Replace `observedErrors` with `parsedErrors` and `stderrErrors`.
-  - `handleJsonLine()` `addError` pushes into `parsedErrors`.
-  - `child.stderr` pushes text into `stderrErrors` and may still append an error event for observability.
-  - `finalizeRun()` builds errors as:
-    - timeout/cancel: terminal override only
-    - exit 0: `dedupeErrors(parsedErrors)`
-    - nonzero exit: process-exit error plus `parsedErrors` plus `stderrErrors`
-  Add a regression test where a worker exits 0 with a valid result while writing `0 errors` to stderr; assert the run completes without final result errors. Keep the existing failed parsed-error test passing.
+- **Comment:** Do not persist parsed worker errors on successful exits. A worker can emit a recoverable or diagnostic error event, then emit a success result and exit 0; the completed result should not carry final `errors`.
+- **Independent Assessment:** Valid. `finalizeRun()` currently uses `exitCode === 0 ? dedupeErrors(parsedErrors) : ...`, so backend-classified parsed errors still appear in the stored successful result. In this codebase, `result.errors` represents terminal run errors, not warning history; successful terminal state should keep historical error events in the event log, not in final result errors.
+- **Decision:** fix-as-suggested
+- **Approach:** Change the success branch to `exitCode === 0 ? [] : ...`. Keep timeout/cancel behavior unchanged, and keep parsed plus stderr errors on nonzero exits. Add a regression test where the mock backend emits an error event, then a valid success result, exits 0, and the final status/result has `errors: []`. Keep the existing failed-run aggregation tests proving parsed errors are preserved for failures.
 - **Files To Change:** `src/processManager.ts`, `src/__tests__/processManager.test.ts`
 - **Reply Draft:**
-  > **[AI Agent]:** Fixed. Heuristic stderr text is still logged, but it is only promoted into final run errors for failed processes; successful worker results no longer inherit benign stderr messages. <!-- agent-orchestrator:pr15:c4 -->
-
-## Item 5 | to-fix | Major
-
-- **Comment Type:** review-inline
-- **File:** `plans/11-add-robust-opencode-orchestration-harness-with-model-settings-and-orchestration-skills/plans/11-opencode-orchestration-harness.md:55`
-- **Comment URL:** https://github.com/ralphkrauss/agent-orchestrator/pull/15#discussion_r3176823408
-- **Author:** `coderabbitai[bot]`
-- **Comment:** Remove real local OpenCode session handles and log paths from the committed plan.
-- **Independent Assessment:** Valid. The plan includes actual-looking OpenCode session ids at lines 54 and 227 and a workstation log path at line 55. These are operational identifiers and should not be published in the public repo.
-- **Decision:** fix-as-suggested
-- **Approach:** Replace real session ids with placeholders such as `ses_<redacted>` or `local OpenCode session exports (redacted)`. Replace the exact log path with `~/.local/share/opencode/log/<redacted>.log` or a generic `local OpenCode log (redacted)`. Leave fake test inputs such as `ses_123` in tests/review evidence alone because they are synthetic examples.
-- **Files To Change:** `plans/11-add-robust-opencode-orchestration-harness-with-model-settings-and-orchestration-skills/plans/11-opencode-orchestration-harness.md`
-- **Reply Draft:**
-  > **[AI Agent]:** Fixed. The plan now redacts local OpenCode session handles and log names while preserving the useful implementation context. <!-- agent-orchestrator:pr15:c5 -->
-
-## Item 6 | to-fix | Major
-
-- **Comment Type:** review-body outside diff
-- **File:** `src/mcpTools.ts:5`
-- **Review ID:** `4215130711`
-- **Author:** `coderabbitai[bot]`
-- **Comment:** The exported MCP `start_run` JSON schema only requires `prompt` and `cwd`, while `StartRunInputSchema.superRefine()` rejects inputs missing both `backend` and `profile` and rejects profile mode mixed with direct settings.
-- **Independent Assessment:** Valid. Tool consumers see a weaker schema than the daemon actually enforces. `src/__tests__/mcpTools.test.ts:26` currently asserts the weak required list.
-- **Decision:** fix-as-suggested
-- **Approach:** Encode the direct/profile union in `tools[0].inputSchema` using JSON Schema keywords. Keep `prompt` and `cwd` required globally, then add a `oneOf` like:
-  ```json
-  [
-    { "required": ["backend"], "not": { "required": ["profile"] } },
-    {
-      "required": ["profile"],
-      "not": {
-        "anyOf": [
-          { "required": ["backend"] },
-          { "required": ["model"] },
-          { "required": ["reasoning_effort"] },
-          { "required": ["service_tier"] }
-        ]
-      }
-    }
-  ]
-  ```
-  Keep `profiles_file` optional for profile mode unless the TypeScript contract is also tightened. Update `mcpTools.test.ts` to assert the presence and shape of the union constraints instead of only `required: ['prompt', 'cwd']`.
-- **Files To Change:** `src/mcpTools.ts`, `src/__tests__/mcpTools.test.ts`
-- **Reply Draft:**
-  > **[AI Agent]:** Fixed. The exported MCP schema now advertises the same direct-mode versus profile-mode constraints that the daemon validates at runtime. <!-- agent-orchestrator:pr15:c6 -->
-
-## Item 7 | to-fix | Minor
-
-- **Comment Type:** review-body duplicate item
-- **File:** `src/backend/claudeValidation.ts:38`
-- **Review ID:** `4215171821`
-- **Author:** `coderabbitai[bot]`
-- **Comment:** Use exact normalized Claude IDs for effort gating. Current substring checks let provider-prefixed or otherwise padded values satisfy `xhigh` and known-model validation.
-- **Independent Assessment:** Valid. `isClaudeOpus47()` and `isKnownClaudeEffortModel()` use `includes()`. Since `normalizeClaudeModel()` only trims, lowercases, and removes `[1m]`, strings such as `anthropic/claude-opus-4-7` or `foo-claude-opus-4-7-bar` can pass checks that claim to require direct ids.
-- **Decision:** fix-as-suggested
-- **Approach:** Replace substring checks with exact membership after normalization:
-  - `isClaudeOpus47(model)` should be `model === 'claude-opus-4-7'`.
-  - `isKnownClaudeEffortModel(model)` should check a `Set` containing `claude-opus-4-7`, `claude-opus-4-6`, and `claude-sonnet-4-6`.
-  - Keep `[1m]` support through `normalizeClaudeModel()`, so `claude-opus-4-7[1m]` normalizes to `claude-opus-4-7`.
-  - Treat `model.includes('/claude-')` as a Claude model id for validation/error messaging, so provider-prefixed values are rejected instead of bypassing the known-model check.
-  Add tests for rejected `anthropic/claude-opus-4-7` with `xhigh`, rejected `foo-claude-opus-4-7-bar` with `xhigh`, and accepted `claude-opus-4-7[1m]` with `xhigh`.
-- **Files To Change:** `src/backend/claudeValidation.ts`, `src/__tests__/opencodeCapabilities.test.ts`, `src/__tests__/integration/orchestrator.test.ts`
-- **Reply Draft:**
-  > **[AI Agent]:** Fixed. Claude effort validation now uses exact normalized direct model ids, preserving the `[1m]` form while rejecting provider-prefixed or padded strings. <!-- agent-orchestrator:pr15:c7 -->
-
-## CI Failure | to-fix | High
-
-- **Check Runs:** `Build, Test, and Pack on Node 22`, `Build, Test, and Pack on Node 24`
-- **Workflow Run:** https://github.com/ralphkrauss/agent-orchestrator/actions/runs/25255026980
-- **Failing Step:** `Install packed tarball smoke test`
-- **Observed Failure:** Both jobs pass `pnpm verify`, then fail with:
-  ```text
-  ./node_modules/.bin/agent-orchestrator-mcp: No such file or directory
-  Process completed with exit code 127.
-  ```
-- **Independent Assessment:** Valid workflow failure. `.github/workflows/ci.yml:53-54` still calls the old package binary `agent-orchestrator-mcp`, but `package.json` now exposes `agent-orchestrator`, `agent-orchestrator-daemon`, and `agent-orchestrator-opencode`.
-- **Decision:** fix workflow smoke
-- **Approach:** Update the packed-tarball smoke step to call current bins. Recommended smoke:
-  ```bash
-  ./node_modules/.bin/agent-orchestrator --help
-  ./node_modules/.bin/agent-orchestrator doctor --json
-  ./node_modules/.bin/agent-orchestrator-daemon --help
-  ./node_modules/.bin/agent-orchestrator-opencode --help
-  ./node_modules/.bin/agent-orchestrator-opencode --print-config >/dev/null
-  ./node_modules/.bin/agent-orchestrator opencode --print-config >/dev/null
-  ```
-  The two `--print-config` checks verify both OpenCode entry points without requiring the `opencode` binary on the CI runner.
-- **Files To Change:** `.github/workflows/ci.yml`
-- **Reply Draft:**
-  > **[AI Agent]:** Fixed. CI now smokes the current package entry points from the packed tarball instead of the removed `agent-orchestrator-mcp` bin. <!-- agent-orchestrator:pr15:ci -->
+  > **[AI Agent]:** Fixed. Successful worker exits now store an empty terminal `errors` array; parsed and stderr errors remain surfaced for failed processes. <!-- agent-orchestrator:pr15:r2:c4 -->
 
 ## Verification Plan
 
-Run after implementing the map:
+Run focused checks after implementing the four items:
 
 ```bash
 pnpm build
@@ -200,21 +98,14 @@ pnpm verify
 node scripts/sync-ai-workspace.mjs --check
 ```
 
-Also run a local packed-tarball smoke that mirrors CI with the new binary names:
+Recommended targeted checks before the full verify:
 
 ```bash
-repo_dir="$PWD"
-package_file="$(npm pack --silent | tail -n 1)"
-temp_dir="$(mktemp -d)"
-cd "$temp_dir"
-npm init -y >/dev/null
-npm install "$repo_dir/$package_file" >/dev/null
-./node_modules/.bin/agent-orchestrator --help
-./node_modules/.bin/agent-orchestrator doctor --json
-./node_modules/.bin/agent-orchestrator-daemon --help
-./node_modules/.bin/agent-orchestrator-opencode --help
-./node_modules/.bin/agent-orchestrator-opencode --print-config >/dev/null
-./node_modules/.bin/agent-orchestrator opencode --print-config >/dev/null
+pnpm build
+node --test dist/__tests__/integration/orchestrator.test.js
+node --test dist/__tests__/opencodeCapabilities.test.js
+node --test dist/__tests__/opencodeHarness.test.js
+node --test dist/__tests__/processManager.test.js
 ```
 
-After pushing, rerun or wait for PR checks. Expected result: both Node 22 and Node 24 jobs pass the `Install packed tarball smoke test` step.
+After pushing, wait for PR checks. Expected result: both `Build, Test, and Pack on Node 22` and `Build, Test, and Pack on Node 24` remain green.

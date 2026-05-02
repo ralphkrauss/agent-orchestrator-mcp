@@ -107,6 +107,11 @@ describe('OpenCode worker capability profiles', () => {
           model: 'foo-claude-opus-4-7-bar',
           reasoning_effort: 'xhigh',
         },
+        unknownEffort: {
+          backend: 'claude',
+          model: 'claude-opus-4-7',
+          reasoning_effort: 'ultra',
+        },
       },
     });
     assert.equal(manifest.ok, true);
@@ -120,6 +125,7 @@ describe('OpenCode worker capability profiles', () => {
     assert.ok(!result.ok && result.errors.some((error) => error.includes('Claude effort levels are documented')));
     assert.ok(!result.ok && result.errors.some((error) => error.includes('profile providerPrefixed: Claude xhigh effort requires claude-opus-4-7')));
     assert.ok(!result.ok && result.errors.some((error) => error.includes('profile padded: Claude xhigh effort requires claude-opus-4-7')));
+    assert.ok(!result.ok && result.errors.some((error) => error.includes('profile unknownEffort: Claude reasoning_effort must be one of low, medium, high, xhigh, or max')));
   });
 
   it('accepts Claude Opus 4.7 one-million-token direct ids for xhigh effort', () => {

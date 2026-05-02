@@ -146,6 +146,32 @@ describe('OpenCode orchestration harness', () => {
     });
   });
 
+  it('allows out-of-workspace orchestration skill writes by exact skill pattern only', () => {
+    const config = buildOpenCodeHarnessConfig({
+      targetCwd: '/home/tester/repo',
+      skillRoots: ['/home/tester/shared-skills'],
+      skillRoot: '/home/tester/shared-skills',
+      mcpCliPath: '/pkg/dist/cli.js',
+      profileDiagnostics: ['missing'],
+      orchestrationSkillNames: [],
+      catalog: createWorkerCapabilityCatalog(),
+      manifestPath: '/home/tester/.config/agent-orchestrator/profiles.json',
+    });
+
+    const agent = config.agent['agent-orchestrator'] as { permission: Record<string, unknown> };
+    assert.deepStrictEqual(agent.permission.edit, {
+      '*': 'deny',
+      '/home/tester/.config/agent-orchestrator/profiles.json': 'allow',
+      '../.config/agent-orchestrator/profiles.json': 'allow',
+      '/home/tester/shared-skills/orchestrate-*/SKILL.md': 'allow',
+    });
+    assert.deepStrictEqual(agent.permission.external_directory, {
+      '*': 'deny',
+      '/home/tester/.config/agent-orchestrator/profiles.json': 'allow',
+      '/home/tester/shared-skills/orchestrate-*/SKILL.md': 'allow',
+    });
+  });
+
   it('surfaces unreadable project skill files during discovery', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-opencode-skills-'));
     const projectSkillRoot = join(root, '.agents', 'skills');

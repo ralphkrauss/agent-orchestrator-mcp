@@ -3,19 +3,20 @@ export function validateClaudeModelAndEffort(
   reasoningEffort: string | null | undefined,
 ): string | null {
   const normalized = normalizeClaudeModel(model);
-  if (reasoningEffort === 'none' || reasoningEffort === 'minimal') {
+  const effort = normalizeClaudeReasoningEffort(reasoningEffort);
+  if (effort && !knownClaudeReasoningEfforts.has(effort)) {
     return 'Claude reasoning_effort must be one of low, medium, high, xhigh, or max';
   }
   if (normalized && isClaudeAlias(normalized)) {
     return 'Claude model must be a direct model id such as claude-opus-4-7 or claude-opus-4-7[1m]; aliases like opus and sonnet can drift';
   }
-  if (reasoningEffort && !normalized) {
+  if (effort && !normalized) {
     return 'Claude reasoning_effort requires an explicit direct model id such as claude-opus-4-7 so fallback behavior is visible';
   }
-  if (reasoningEffort === 'xhigh' && normalized && !isClaudeOpus47(normalized)) {
+  if (effort === 'xhigh' && normalized && !isClaudeOpus47(normalized)) {
     return 'Claude xhigh effort requires claude-opus-4-7 or claude-opus-4-7[1m]; other Claude models can fall back to high';
   }
-  if (reasoningEffort && normalized && isAnthropicClaudeModelId(normalized) && !isKnownClaudeEffortModel(normalized)) {
+  if (effort && normalized && isAnthropicClaudeModelId(normalized) && !isKnownClaudeEffortModel(normalized)) {
     return 'Claude effort levels are documented for Opus 4.7, Opus 4.6, and Sonnet 4.6; use one of those direct model ids';
   }
   return null;
@@ -24,6 +25,11 @@ export function validateClaudeModelAndEffort(
 function normalizeClaudeModel(model: string | null | undefined): string | null {
   const value = model?.trim().toLowerCase();
   return value ? value.replace(/\[1m\]$/, '') : null;
+}
+
+function normalizeClaudeReasoningEffort(reasoningEffort: string | null | undefined): string | null {
+  const value = reasoningEffort?.trim().toLowerCase();
+  return value || null;
 }
 
 function isClaudeAlias(model: string): boolean {
@@ -51,4 +57,12 @@ const knownClaudeEffortModels = new Set([
   'claude-opus-4-7',
   'claude-opus-4-6',
   'claude-sonnet-4-6',
+]);
+
+const knownClaudeReasoningEfforts = new Set([
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
 ]);

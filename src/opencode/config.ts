@@ -1,4 +1,4 @@
-import { join, relative } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import type { ValidatedWorkerProfiles, WorkerCapabilityCatalog } from './capabilities.js';
 
 export const OPENCODE_ORCHESTRATOR_AGENT = 'agent-orchestrator';
@@ -80,7 +80,7 @@ function orchestrationPermission(targetCwd: string, skillRoot: string, manifestP
     webfetch: 'deny',
     websearch: 'deny',
     task: 'deny',
-    external_directory: profileManifestExternalDirectoryPermission(manifestPath),
+    external_directory: externalDirectoryPermission(targetCwd, skillRoot, manifestPath),
     bash: 'deny',
     'agent-orchestrator_*': 'allow',
     'github_*': 'deny',
@@ -96,11 +96,16 @@ function setupEditPermission(targetCwd: string, skillRoot: string, manifestPath:
   ]);
 }
 
-function profileManifestExternalDirectoryPermission(manifestPath: string): Record<string, string> {
-  return {
+function externalDirectoryPermission(targetCwd: string, skillRoot: string, manifestPath: string): Record<string, string> {
+  const permission: Record<string, string> = {
     '*': 'deny',
     [manifestPath]: 'allow',
   };
+  const skillPattern = join(skillRoot, 'orchestrate-*', 'SKILL.md');
+  if (isOutsideTargetCwd(targetCwd, skillPattern)) {
+    permission[skillPattern] = 'allow';
+  }
+  return permission;
 }
 
 function manifestPermissionPaths(manifestPath: string, targetCwd: string): string[] {
@@ -123,6 +128,11 @@ function setupPermissionPaths(
     paths.push(relativePattern);
   }
   return Array.from(new Set(paths));
+}
+
+function isOutsideTargetCwd(targetCwd: string, absolutePath: string): boolean {
+  const relativePath = relative(targetCwd, absolutePath);
+  return relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath);
 }
 
 function orchestrationPrompt(input: OpenCodeHarnessConfigInput): string {
