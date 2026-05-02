@@ -25,6 +25,19 @@ describe('IPC protocol', () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it('round-trips JSON-RPC requests over a Windows named pipe', { skip: process.platform !== 'win32' }, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-ipc-win-'));
+    const endpoint = daemonIpcEndpoint(root, 'win32');
+    assert.equal(endpoint.transport, 'windows_pipe');
+    const server = new IpcServer(endpoint.path, async (method, params, context) => ({ method, params, frontend_version: context.frontend_version }));
+    await server.listen();
+    const client = new IpcClient(endpoint.path);
+    const result = await client.request('ping', { hello: 'windows' });
+    assert.deepStrictEqual(result, { method: 'ping', params: { hello: 'windows' }, frontend_version: getPackageVersion() });
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
   it('returns protocol mismatch as an orchestrator error', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-ipc-'));
     const endpoint = daemonIpcEndpoint(root);

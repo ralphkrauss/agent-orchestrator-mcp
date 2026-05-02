@@ -13,6 +13,9 @@ let originalPath = process.env.PATH;
 let originalOpenAiKey = process.env.OPENAI_API_KEY;
 let originalCodexKey = process.env.CODEX_API_KEY;
 let originalAnthropicKey = process.env.ANTHROPIC_API_KEY;
+let originalPathext = process.env.PATHEXT;
+let originalComSpec = process.env.ComSpec;
+let originalComspec = process.env.COMSPEC;
 
 describe('backend diagnostics', () => {
   beforeEach(() => {
@@ -20,6 +23,9 @@ describe('backend diagnostics', () => {
     originalOpenAiKey = process.env.OPENAI_API_KEY;
     originalCodexKey = process.env.CODEX_API_KEY;
     originalAnthropicKey = process.env.ANTHROPIC_API_KEY;
+    originalPathext = process.env.PATHEXT;
+    originalComSpec = process.env.ComSpec;
+    originalComspec = process.env.COMSPEC;
     delete process.env.OPENAI_API_KEY;
     delete process.env.CODEX_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
@@ -30,6 +36,9 @@ describe('backend diagnostics', () => {
     restoreEnv('OPENAI_API_KEY', originalOpenAiKey);
     restoreEnv('CODEX_API_KEY', originalCodexKey);
     restoreEnv('ANTHROPIC_API_KEY', originalAnthropicKey);
+    restoreEnv('PATHEXT', originalPathext);
+    restoreEnv('ComSpec', originalComSpec);
+    restoreEnv('COMSPEC', originalComspec);
   });
 
   it('reports missing backend binaries without failing the whole report', async () => {
@@ -57,6 +66,37 @@ describe('backend diagnostics', () => {
     assert.equal(report.posix_supported, false);
     assert.deepStrictEqual(report.backends.map((backend) => backend.status), ['missing', 'missing']);
     assert.ok(report.backends.every((backend) => backend.checks.some((check) => check.name.includes('binary on PATH'))));
+  });
+
+  it('executes Windows cmd backend shims through the command processor', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-diag-win-bin-'));
+    const bin = join(root, 'bin');
+    await mkdir(bin);
+    await writeWindowsMockCli(bin, 'codex', [
+      ['--version', 'codex 1.2.3'],
+      ['exec --help', 'Usage: codex exec --json --cd --skip-git-repo-check --model -'],
+      ['exec resume --help', 'Usage: codex exec resume --json --skip-git-repo-check --model <session> -'],
+    ]);
+    await writeWindowsMockCli(bin, 'claude', [
+      ['--version', 'claude 2.3.4'],
+      ['--help', 'Usage: claude -p --output-format stream-json --resume --model <session>'],
+    ]);
+    process.env.PATH = bin;
+    process.env.PATHEXT = '.CMD';
+    if (process.platform !== 'win32') {
+      const commandProcessor = join(root, 'cmd-proxy.js');
+      await writeWindowsCommandProcessor(commandProcessor);
+      process.env.ComSpec = commandProcessor;
+      delete process.env.COMSPEC;
+    }
+
+    const report = await getBackendStatus({ platform: 'win32' });
+
+    assert.equal(report.platform, 'win32');
+    assert.equal(report.posix_supported, false);
+    assert.deepStrictEqual(report.backends.map((backend) => backend.status), ['auth_unknown', 'auth_unknown']);
+    assert.deepStrictEqual(report.backends.map((backend) => backend.version), ['codex 1.2.3', 'claude 2.3.4']);
+    assert.ok(report.backends.every((backend) => backend.checks.every((check) => check.ok)));
   });
 
   it('reports auth_unknown when binaries and required flags exist but auth cannot be proven locally', async () => {
@@ -168,6 +208,61 @@ process.exit(1);
   const scriptPath = join(bin, name);
   await writeFile(scriptPath, script);
   await chmod(scriptPath, 0o755);
+}
+
+async function writeWindowsMockCli(bin: string, name: string, responses: [string, string][]): Promise<void> {
+  const cases = responses
+    .map(([args, output]) => `if (key === ${JSON.stringify(args)}) { console.log(${JSON.stringify(output)}); process.exit(0); }`)
+    .join('\n');
+  const script = `const key = process.argv.slice(2).join(' ');
+${cases}
+console.error('unexpected args: ' + key);
+process.exit(1);
+`;
+
+  await writeFile(join(bin, `${name}.js`), script);
+  const cmdPath = join(bin, `${name}.cmd`);
+  await writeFile(cmdPath, `@echo off\r\n"${process.execPath}" "%~dp0\\${name}.js" %*\r\n`);
+  if (process.platform !== 'win32') await chmod(cmdPath, 0o755);
+}
+
+async function writeWindowsCommandProcessor(path: string): Promise<void> {
+  const script = `#!/usr/bin/env node
+const { basename } = require('node:path');
+
+const commandLine = process.argv.at(-1) || '';
+const parsed = parseCommandLine(commandLine);
+const binary = basename(parsed.command).replace(/\\.cmd$/i, '').toLowerCase();
+const responses = {
+  codex: {
+    '--version': 'codex 1.2.3',
+    'exec --help': 'Usage: codex exec --json --cd --skip-git-repo-check --model -',
+    'exec resume --help': 'Usage: codex exec resume --json --skip-git-repo-check --model <session> -',
+  },
+  claude: {
+    '--version': 'claude 2.3.4',
+    '--help': 'Usage: claude -p --output-format stream-json --resume --model <session>',
+  },
+};
+const output = responses[binary]?.[parsed.args];
+if (output) {
+  console.log(output);
+  process.exit(0);
+}
+console.error('unexpected command: ' + commandLine);
+process.exit(1);
+
+function parseCommandLine(value) {
+  if (value.startsWith('"')) {
+    const end = value.indexOf('"', 1);
+    return { command: value.slice(1, end), args: value.slice(end + 1).trim() };
+  }
+  const [command, ...rest] = value.split(' ');
+  return { command, args: rest.join(' ').trim() };
+}
+`;
+  await writeFile(path, script);
+  await chmod(path, 0o755);
 }
 
 function restoreEnv(name: string, value: string | undefined): void {

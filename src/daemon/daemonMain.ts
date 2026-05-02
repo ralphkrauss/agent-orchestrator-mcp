@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, lstatSync, openSync, readFileSync, unlinkSync, writeFileSync, type Stats } from 'node:fs';
 import { lstat, rm } from 'node:fs/promises';
 import { appendFileSync } from 'node:fs';
 import { IpcServer } from '../ipc/server.js';
@@ -82,13 +82,26 @@ function isPidAlive(pid: number): boolean {
 }
 
 async function cleanupIpcEndpoint(): Promise<void> {
-  if (!paths.ipc.cleanupPath || !existsSync(paths.ipc.cleanupPath)) return;
-  const info = await lstat(paths.ipc.cleanupPath);
+  const cleanupPath = paths.ipc.cleanupPath;
+  if (!cleanupPath) return;
+
+  let info: Stats;
+  try {
+    info = await lstat(cleanupPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+
   const uid = process.getuid?.();
   if (typeof uid === 'number' && info.uid !== uid) {
-    throw new Error(`Refusing to remove foreign-owned IPC endpoint ${paths.ipc.cleanupPath} owned by uid ${info.uid}`);
+    throw new Error(`Refusing to remove foreign-owned IPC endpoint ${cleanupPath} owned by uid ${info.uid}`);
   }
-  await rm(paths.ipc.cleanupPath, { force: true });
+  try {
+    await rm(cleanupPath, { force: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
 }
 
 async function cleanup(): Promise<void> {
@@ -98,7 +111,7 @@ async function cleanup(): Promise<void> {
     // Ignore during process shutdown.
   }
   try {
-    if (paths.ipc.cleanupPath) await rm(paths.ipc.cleanupPath, { force: true });
+    await cleanupIpcEndpoint();
   } catch {
     // Ignore during process shutdown.
   }
@@ -114,11 +127,31 @@ process.on('exit', () => {
   try {
     if (pidFd !== null) closeSync(pidFd);
     if (existsSync(paths.pid) && readExistingPid() === process.pid) unlinkSync(paths.pid);
-    if (paths.ipc.cleanupPath && existsSync(paths.ipc.cleanupPath)) unlinkSync(paths.ipc.cleanupPath);
+    if (paths.ipc.cleanupPath) unlinkOwnedIpcEndpointSync(paths.ipc.cleanupPath);
   } catch {
     // Process is exiting; best effort only.
   }
 });
+
+function unlinkOwnedIpcEndpointSync(cleanupPath: string): void {
+  let info: Stats;
+  try {
+    info = lstatSync(cleanupPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+
+  const uid = process.getuid?.();
+  if (typeof uid === 'number' && info.uid !== uid) {
+    throw new Error(`Refusing to remove foreign-owned IPC endpoint ${cleanupPath} owned by uid ${info.uid}`);
+  }
+  try {
+    unlinkSync(cleanupPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
 
 main().catch(async (error) => {
   log(`fatal: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);

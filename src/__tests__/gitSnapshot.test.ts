@@ -73,7 +73,7 @@ process.exit(1);
     assert.ok(changed.includes('untracked.txt'));
   });
 
-  it('bounds large file fingerprinting and fingerprints symlinks without following targets', { skip: process.platform === 'win32' }, async () => {
+  it('bounds large file fingerprinting', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-git-'));
     const repo = join(root, 'repo');
     await mkdir(repo);
@@ -85,21 +85,41 @@ process.exit(1);
     await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: repo });
 
     await writeFile(join(repo, 'large.bin'), Buffer.alloc(1024 * 1024 + 1, 1));
-    await symlink('target-one', join(repo, 'special-link'));
 
     const capture = await captureGitSnapshot(repo);
     assert.equal(capture.status, 'captured');
     assert.ok(capture.snapshot);
     assert.match(capture.snapshot.dirty_fingerprints?.['large.bin'] ?? '', /^file-meta:/);
+
+    await writeFile(join(repo, 'large.bin'), Buffer.alloc(1024 * 1024 + 2, 2));
+
+    const changed = await changedFilesSinceSnapshot(repo, capture.snapshot);
+    assert.ok(changed.includes('large.bin'));
+  });
+
+  it('fingerprints symlinks without following targets', { skip: process.platform === 'win32' }, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-git-'));
+    const repo = join(root, 'repo');
+    await mkdir(repo);
+    await execFileAsync('git', ['init'], { cwd: repo });
+    await execFileAsync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo });
+    await execFileAsync('git', ['config', 'user.name', 'Test'], { cwd: repo });
+    await writeFile(join(repo, 'tracked.txt'), 'clean\n');
+    await execFileAsync('git', ['add', 'tracked.txt'], { cwd: repo });
+    await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: repo });
+
+    await symlink('target-one', join(repo, 'special-link'));
+
+    const capture = await captureGitSnapshot(repo);
+    assert.equal(capture.status, 'captured');
+    assert.ok(capture.snapshot);
     assert.match(capture.snapshot.dirty_fingerprints?.['special-link'] ?? '', /^symlink:/);
     assert.ok(capture.snapshot.dirty_fingerprints?.['special-link']?.includes('target-one'));
 
-    await writeFile(join(repo, 'large.bin'), Buffer.alloc(1024 * 1024 + 2, 2));
     await unlink(join(repo, 'special-link'));
     await symlink('target-two', join(repo, 'special-link'));
 
     const changed = await changedFilesSinceSnapshot(repo, capture.snapshot);
-    assert.ok(changed.includes('large.bin'));
     assert.ok(changed.includes('special-link'));
   });
 });

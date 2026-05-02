@@ -133,6 +133,7 @@ No existing `plans/` directory was present before this plan.
 - [ ] Affected build command passes: `pnpm build` blocked because `node_modules` is absent and `tsc` is not installed locally.
 - [ ] Affected tests pass: `pnpm test` returned exit 0 but discovered 0 tests because `dist/` is absent; not accepted as meaningful verification.
 - [ ] Release-quality check considered or run: `pnpm verify` blocked at `pnpm build` for missing `tsc`.
+- [ ] Native Windows IPC round-trip smoke: Windows-only test added; local execution remains pending until a Windows runtime or Windows CI runner is available.
 - [x] Dependency-free diff check passes: `git diff --check`.
 - [x] Relevant `.agents/rules/` checks are satisfied for source/docs changes; no installs, commits, secrets, hooks, or external writes were performed.
 
@@ -175,5 +176,5 @@ No existing `plans/` directory was present before this plan.
 
 ### T8: Run focused and release-quality verification
 - **Status:** blocked
-- **Evidence:** `git diff --check` passed. `pnpm build` failed with `sh: 1: tsc: not found` and the pnpm warning that `node_modules` is missing. `pnpm test` returned exit 0 but found 0 tests because `dist/` is absent. `pnpm verify` failed at `pnpm build` with the same missing `tsc` error.
+- **Evidence:** `git diff --check` passed. `pnpm build` failed with `sh: 1: tsc: not found` and the pnpm warning that `node_modules` is missing. `pnpm test` returned exit 0 but found 0 tests because `dist/` is absent. `pnpm verify` failed at `pnpm build` with the same missing `tsc` error. Native Windows IPC round-trip smoke has been added as a Windows-only test but remains unexecuted locally until a Windows runtime or Windows CI runner is available.
 - **Notes:** Repository rules require explicit permission before installing packages; `pnpm install --frozen-lockfile` was not run.
