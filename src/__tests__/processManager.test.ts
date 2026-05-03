@@ -256,7 +256,12 @@ setInterval(() => {}, 1000);
 
     managed.cancel('timed_out', { reason: 'idle_timeout', timeout_reason: 'idle_timeout' });
 
-    const meta = await managed.completion;
+    const meta = await Promise.race([
+      managed.completion,
+      new Promise<never>((_resolve, reject) => {
+        setTimeout(() => reject(new Error('timed out waiting for idle-timeout completion')), 3_000);
+      }),
+    ]);
     const result = await store.loadResult(run.run_id);
     assert.equal(meta.status, 'timed_out');
     assert.equal(meta.timeout_reason, 'idle_timeout');
