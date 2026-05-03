@@ -45,6 +45,12 @@ describe('MCP tool registration', () => {
     assert.equal(Object.hasOwn(observability.properties, 'include_prompts'), true);
     assert.equal(Object.hasOwn(observability.properties, 'recent_event_limit'), true);
     assert.equal(Object.hasOwn(observability.properties, 'diagnostics'), true);
+
+    const progress = schemaFor('get_run_progress');
+    assert.equal(Object.hasOwn(progress.properties, 'after_sequence'), true);
+    assert.equal(Object.hasOwn(progress.properties, 'limit'), true);
+    assert.equal(Object.hasOwn(progress.properties, 'max_text_chars'), true);
+    assert.deepStrictEqual(progress.required, ['run_id']);
   });
 
   it('keeps advertised input schemas compatible with OpenCode tool loading', () => {

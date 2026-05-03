@@ -1,12 +1,14 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { tools as mcpTools } from '../mcpTools.js';
 import {
   buildClaudeSupervisorSettings,
   CLAUDE_MCP_SERVER_NAME,
+  claudeOrchestratorMcpToolAllowList,
+  claudeOrchestratorMcpToolDenyList,
   orchestratorMcpToolAllowList,
   stringifyClaudeSupervisorSettings,
 } from '../claude/permission.js';
@@ -26,32 +28,50 @@ describe('Claude harness permission and allowlist', () => {
     assert.deepStrictEqual(orchestratorMcpToolAllowList(), expected);
   });
 
-  it('builds settings that allow Read/Glob/Grep + agent-orchestrator MCP tools and deny Bash/Edit/Write/WebFetch/WebSearch/Task/NotebookEdit/TodoWrite', () => {
-    const settings = buildClaudeSupervisorSettings();
+  it('claudeOrchestratorMcpToolAllowList excludes MCP blocking wait tools', () => {
+    assert.ok(!claudeOrchestratorMcpToolAllowList().includes(`mcp__${CLAUDE_MCP_SERVER_NAME}__wait_for_any_run`));
+    assert.ok(!claudeOrchestratorMcpToolAllowList().includes(`mcp__${CLAUDE_MCP_SERVER_NAME}__wait_for_run`));
+    assert.deepStrictEqual(claudeOrchestratorMcpToolDenyList(), [
+      `mcp__${CLAUDE_MCP_SERVER_NAME}__wait_for_any_run`,
+      `mcp__${CLAUDE_MCP_SERVER_NAME}__wait_for_run`,
+    ]);
+  });
+
+  it('builds settings that allow Read/Glob/Grep + the pinned Bash monitor + agent-orchestrator MCP tools, denying other write/exfil tools', () => {
+    const monitorPin = resolveMonitorPin({ AGENT_ORCHESTRATOR_BIN: '/abs/agent-orchestrator' });
+    const settings = buildClaudeSupervisorSettings({
+      monitorBashAllowlistPattern: monitorPin.bash_allowlist_pattern,
+    });
     assert.deepStrictEqual(
       [...settings.permissions.allow].sort(),
-      ['Glob', 'Grep', 'Read', ...orchestratorMcpToolAllowList()].sort(),
+      ['Glob', 'Grep', 'Read', `Bash(${monitorPin.bash_allowlist_pattern})`, ...claudeOrchestratorMcpToolAllowList()].sort(),
     );
-    for (const denied of ['Bash', 'Edit', 'Write', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit', 'TodoWrite']) {
+    assert.equal(settings.permissions.defaultMode, 'dontAsk');
+    for (const denied of ['Edit', 'Write', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit', 'TodoWrite']) {
       assert.ok(settings.permissions.deny.includes(denied), `${denied} must be denied`);
     }
-    // The pinned monitor Bash pattern is intentionally NOT in allow: Bash is
-    // not exposed inside the supervisor envelope at all (built-in availability
-    // is restricted via --tools at spawn time, and bare Bash is in deny for
-    // defense in depth). The agent-orchestrator monitor CLI is documented for
-    // the user's own shell only.
-    assert.equal(settings.permissions.allow.some((rule) => rule.startsWith('Bash(')), false, 'no Bash pattern is allowed inside the envelope');
+    assert.equal(
+      settings.permissions.deny.includes('Bash'),
+      false,
+      'bare Bash deny would shadow the narrower Bash(<monitor>) allow rule',
+    );
+    assert.ok(settings.permissions.deny.includes('Bash(jq *)'));
+    assert.ok(settings.permissions.deny.includes('Bash(*tool-results*)'));
+    assert.ok(settings.permissions.deny.includes('Bash(*.claude/projects*)'));
+    assert.ok(settings.permissions.deny.includes(`mcp__${CLAUDE_MCP_SERVER_NAME}__wait_for_any_run`));
+    assert.ok(settings.permissions.deny.includes(`mcp__${CLAUDE_MCP_SERVER_NAME}__wait_for_run`));
     assert.equal(settings.enableAllProjectMcpServers, false);
     const json = stringifyClaudeSupervisorSettings(settings);
     JSON.parse(json);
   });
 });
 
-describe('Claude monitor pin (used in the system prompt as informational pointer to the standalone CLI)', () => {
+describe('Claude monitor pin', () => {
   it('uses the AGENT_ORCHESTRATOR_BIN override when absolute and exposes a canonical command prefix', () => {
     const pin = resolveMonitorPin({ AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' });
     assert.equal(pin.bin, '/opt/agent-orchestrator');
     assert.equal(pin.command_prefix_string, `${process.execPath} /opt/agent-orchestrator`);
+    assert.equal(pin.bash_allowlist_pattern, `${process.execPath} /opt/agent-orchestrator monitor *`);
     assert.deepStrictEqual(pin.command_prefix, [process.execPath, '/opt/agent-orchestrator']);
   });
 
@@ -125,7 +145,7 @@ describe('Claude skill curation', () => {
 });
 
 describe('Claude harness config builder', () => {
-  it('builds a system prompt that uses MCP polling for run supervision, references only the agent-orchestrator MCP server, and lists curated orchestrate-* skill names', () => {
+  it('builds a system prompt that uses pinned Bash monitors as the only blocking wait and lists curated orchestrate-* skill names', () => {
     const monitorPin = resolveMonitorPin({ AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' });
     const catalog = createWorkerCapabilityCatalog(null);
     const config = buildClaudeHarnessConfig({
@@ -140,13 +160,23 @@ describe('Claude harness config builder', () => {
     });
     assert.match(config.systemPrompt, /agent-orchestrator/);
     assert.match(config.systemPrompt, /orchestrate-create-plan/);
-    assert.match(config.systemPrompt, /wait_for_any_run/);
-    // Bash-background-monitor is intentionally NOT taught in the prompt because
-    // Bash is not exposed inside the envelope. The standalone CLI prefix is
-    // mentioned only as an "out-of-envelope" pointer.
-    assert.match(config.systemPrompt, /standalone CLI is:.*\/opt\/agent-orchestrator monitor <run_id>/);
-    assert.match(config.systemPrompt, /Bash is not available inside the envelope/);
-    assert.equal(/Bash run_in_background/i.test(config.systemPrompt), false, 'system prompt must not instruct supervisor to use Bash run_in_background');
+    assert.match(config.systemPrompt, /persistent agent-orchestrator daemon owns worker subprocesses/);
+    assert.match(config.systemPrompt, /runs continue in the daemon after the supervisor returns control/);
+    assert.match(config.systemPrompt, /durable notification records are authoritative/);
+    assert.match(config.systemPrompt, /Bash is allowed only for the pinned monitor command pattern/);
+    assert.match(config.systemPrompt, /\/opt\/agent-orchestrator monitor <run_id> --json-line/);
+    assert.match(config.systemPrompt, /Bash run_in_background: true/);
+    assert.match(config.systemPrompt, /For each active run, use exactly one active wait mechanism at a time/);
+    assert.match(config.systemPrompt, /Progress and status checks/);
+    assert.match(config.systemPrompt, /mcp__agent-orchestrator__get_run_progress first/);
+    assert.match(config.systemPrompt, /Never use Bash, jq, cat, head, tail, grep, rg, sed, awk, or Claude Code tool-result files/);
+    assert.match(config.systemPrompt, /Do not inspect Claude Code internal files under \.claude\/projects or tool-results/);
+    assert.match(config.systemPrompt, /While a Bash monitor is active for a run, do not call any MCP blocking wait tool/);
+    assert.match(config.systemPrompt, /If you inherit active run_ids without live monitor handles.*launch a new pinned Bash monitor/s);
+    assert.match(config.systemPrompt, /Do not call wait_for_any_run or wait_for_run in the Claude supervisor/);
+    assert.doesNotMatch(config.systemPrompt, /^- mcp__agent-orchestrator__wait_for_any_run$/m);
+    assert.doesNotMatch(config.systemPrompt, /^- mcp__agent-orchestrator__wait_for_run$/m);
+    assert.match(config.systemPrompt, /Cross-turn reconciliation/);
     assert.deepStrictEqual(Object.keys(config.mcpConfig.mcpServers), [CLAUDE_MCP_SERVER_NAME]);
     const mcpJson = stringifyClaudeMcpConfig(config.mcpConfig);
     JSON.parse(mcpJson);
@@ -154,16 +184,19 @@ describe('Claude harness config builder', () => {
 });
 
 describe('Claude launcher envelope', () => {
-  it('builds an isolated envelope: --strict-mcp-config + --tools "Read,Glob,Grep" (no Bash), no --add-dir, no --dangerously-skip-permissions, no --disable-slash-commands, no --allowed-tools', async () => {
+  it('builds an isolated envelope: --strict-mcp-config + pinned Bash monitor allowlist, no --add-dir, no --dangerously-skip-permissions, no --disable-slash-commands', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'agent-claude-launch-'));
     const skillsPath = join(cwd, '.agents', 'skills');
     await mkdir(join(skillsPath, 'orchestrate-foo'), { recursive: true });
     await writeFile(join(skillsPath, 'orchestrate-foo', 'SKILL.md'), '---\nname: orchestrate-foo\n---\nbody');
     const profilesPath = join(cwd, 'profiles.json');
     await writeFile(profilesPath, JSON.stringify({ version: 1, profiles: { 'p1': { backend: 'claude', model: 'claude-opus-4-7' } } }));
+    const stateDir = join(cwd, 'claude-state');
+    await mkdir(join(stateDir, 'claude-config'), { recursive: true });
+    await writeFile(join(stateDir, 'claude-config', '.credentials.json'), '{"legacy":true}\n');
 
     const parsed = parseClaudeLauncherArgs(
-      ['--cwd', cwd, '--profiles-file', profilesPath, '--skills', skillsPath],
+      ['--cwd', cwd, '--profiles-file', profilesPath, '--skills', skillsPath, '--state-dir', stateDir],
       { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' },
       cwd,
     );
@@ -179,37 +212,81 @@ describe('Claude launcher envelope', () => {
       const settings = JSON.parse(built.settingsContent);
       assert.equal(settings.enableAllProjectMcpServers, false);
       assert.ok(Array.isArray(settings.permissions.allow));
-      assert.ok(settings.permissions.deny.includes('Bash'), 'settings.deny must include Bash for defense in depth');
+      assert.equal(settings.permissions.defaultMode, 'dontAsk');
+      assert.ok(settings.permissions.allow.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor *)`));
+      assert.equal(settings.permissions.deny.includes('Bash'), false, 'bare Bash deny would shadow the pinned monitor allow rule');
+      assert.ok(settings.permissions.deny.includes('Bash(jq *)'));
+      assert.ok(settings.permissions.deny.includes('Bash(*tool-results*)'));
       const mcp = JSON.parse(built.mcpConfigContent);
       assert.deepStrictEqual(Object.keys(mcp.mcpServers), [CLAUDE_MCP_SERVER_NAME]);
       assert.ok(built.spawnArgs.includes('--strict-mcp-config'), 'spawn args must include --strict-mcp-config');
       assert.ok(!built.spawnArgs.includes('--dangerously-skip-permissions'), 'spawn args must never include --dangerously-skip-permissions');
       assert.ok(!built.spawnArgs.includes('--disable-slash-commands'), 'spawn args must not include --disable-slash-commands (would also disable orchestrate-* skills)');
       assert.ok(!built.spawnArgs.includes('--add-dir'), 'spawn args must NOT include --add-dir: Claude scans add-dir paths for project skills/commands/agents/hooks/CLAUDE.md, which would re-introduce target workspace .claude/* leakage');
-      assert.ok(!built.spawnArgs.includes('--allowed-tools'), 'spawn args must NOT include --allowed-tools: it only pre-approves, it does not restrict availability — built-in availability is constrained via --tools instead');
       assert.ok(built.spawnArgs.includes('--tools'), 'spawn args must restrict built-in tool availability via --tools');
       const toolsValue = built.spawnArgs[built.spawnArgs.indexOf('--tools') + 1] ?? '';
-      assert.equal(toolsValue, 'Read,Glob,Grep', '--tools must contain only Read,Glob,Grep (no Bash, Edit, Write, etc.)');
-      assert.equal(built.spawnEnv.HOME, join(built.envelopeDir, 'home'));
-      assert.equal(built.spawnEnv.XDG_CONFIG_HOME, join(built.envelopeDir, 'xdg-config'));
-      assert.equal(built.spawnEnv.CLAUDE_CONFIG_DIR, join(built.envelopeDir, 'claude-config'));
+      assert.equal(toolsValue, 'Read,Glob,Grep,Bash', '--tools must contain only Read,Glob,Grep,Bash');
+      assert.ok(built.spawnArgs.includes('--allowed-tools'), 'spawn args must pre-approve the pinned Bash monitor and safe MCP tools');
+      const allowedTools = built.spawnArgs[built.spawnArgs.indexOf('--allowed-tools') + 1] ?? '';
+      assert.match(allowedTools, /Read/);
+      assert.match(allowedTools, /Bash\(.*\/opt\/agent-orchestrator monitor \*\)/);
+      assert.match(allowedTools, /mcp__agent-orchestrator__start_run/);
+      assert.doesNotMatch(allowedTools, /mcp__agent-orchestrator__wait_for_any_run/);
+      assert.doesNotMatch(allowedTools, /mcp__agent-orchestrator__wait_for_run/);
+      assert.ok(built.spawnArgs.includes('--permission-mode'), 'spawn args must set dontAsk so non-allowlisted Bash does not prompt');
+      assert.equal(built.spawnArgs[built.spawnArgs.indexOf('--permission-mode') + 1], 'dontAsk');
+      assert.equal(built.stateDir, stateDir);
+      assert.equal(built.spawnEnv.HOME, join(stateDir, 'home'));
+      assert.equal(built.spawnEnv.XDG_CONFIG_HOME, join(stateDir, 'home', '.config'));
+      assert.equal(built.spawnEnv.CLAUDE_CONFIG_DIR, join(stateDir, 'home', '.claude'));
+      assert.equal(built.spawnEnv.NO_COLOR, undefined, 'interactive Claude supervisor must not force-disable terminal colors');
+      assert.equal(built.spawnEnv.AGENT_ORCHESTRATOR_HOME, process.env.AGENT_ORCHESTRATOR_HOME ?? join(process.env.HOME ?? '', '.agent-orchestrator'));
+      assert.notEqual(built.spawnEnv.HOME, join(built.envelopeDir, 'home'), 'Claude auth state must not be tied to the workspace envelope');
+      assert.ok(built.envelopeDir.startsWith(join(stateDir, 'envelopes')), 'supervisor cwd must be stable under the durable state dir, not a random temp dir');
+      assert.deepStrictEqual(
+        JSON.parse(await readFile(join(stateDir, 'home', '.claude', '.credentials.json'), 'utf8')),
+        { legacy: true },
+        'legacy durable credentials must migrate into HOME/.claude, which Claude auth actually reads',
+      );
       // Skill curation: orchestrate-* lives at <envelope>/.claude/skills/<name>/SKILL.md so
       // Claude's cwd-rooted skill discovery can find them when the spawn cwd = envelopeDir.
       assert.equal(built.skillsRoot, join(built.envelopeDir, '.claude', 'skills'));
       const curated = await readFile(join(built.skillsRoot, 'orchestrate-foo', 'SKILL.md'), 'utf8');
       assert.match(curated, /orchestrate-foo/);
+
+      await mkdir(join(built.envelopeDir, '.claude', 'commands'), { recursive: true });
+      await writeFile(join(built.envelopeDir, '.claude', 'commands', 'stale.md'), 'stale command');
+      await writeFile(join(built.envelopeDir, '.mcp.json'), '{"mcpServers":{"stale":{"command":"evil"}}}');
+      await writeFile(join(built.envelopeDir, 'CLAUDE.md'), 'stale project memory');
+      const rebuilt = await buildClaudeEnvelope({
+        options: parsed.value,
+        env: { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' },
+        catalog: createWorkerCapabilityCatalog(null),
+        profilesResult: { profiles: undefined, diagnostics: [] },
+      });
+      try {
+        assert.equal(rebuilt.envelopeDir, built.envelopeDir, 'same target workspace must reuse the same isolated supervisor cwd');
+        await assert.rejects(() => readFile(join(rebuilt.envelopeDir, '.claude', 'commands', 'stale.md'), 'utf8'));
+        await assert.rejects(() => readFile(join(rebuilt.envelopeDir, '.mcp.json'), 'utf8'));
+        await assert.rejects(() => readFile(join(rebuilt.envelopeDir, 'CLAUDE.md'), 'utf8'));
+        assert.match(await readFile(join(rebuilt.skillsRoot, 'orchestrate-foo', 'SKILL.md'), 'utf8'), /orchestrate-foo/);
+      } finally {
+        await rebuilt.cleanup();
+      }
     } finally {
       await built.cleanup();
     }
-    await assert.rejects(() => readFile(join(built.envelopeDir, 'settings.json'), 'utf8'));
+    assert.equal((await stat(built.envelopeDir)).isDirectory(), true, 'stable supervisor cwd must survive cleanup so Claude trust and session history stay reusable');
+    assert.equal((await stat(stateDir)).isDirectory(), true, 'durable Claude state must survive envelope cleanup so login persists');
   });
 
-  it('buildClaudeSpawnArgs sets the canonical isolation flags and excludes any leak-prone or pre-approval flags', () => {
+  it('buildClaudeSpawnArgs sets the canonical isolation flags, pinned monitor pre-approval, and deny-by-default mode', () => {
     const args = buildClaudeSpawnArgs({
       settingsPath: '/x/settings.json',
       mcpConfigPath: '/x/mcp.json',
       systemPromptPath: '/x/system.md',
-      builtinTools: ['Read', 'Glob', 'Grep'],
+      builtinTools: ['Read', 'Glob', 'Grep', 'Bash'],
+      allowedTools: ['Read', 'Glob', 'Grep', 'Bash(node /abs/cli.js monitor *)', 'mcp__agent-orchestrator__start_run'],
       passthrough: ['--print', '--output-format', 'json'],
     });
     assert.ok(args.includes('--strict-mcp-config'));
@@ -219,11 +296,14 @@ describe('Claude launcher envelope', () => {
     assert.equal(args[args.indexOf('--setting-sources') + 1], '');
     assert.ok(args.includes('--append-system-prompt-file'));
     assert.ok(args.includes('--tools'));
-    assert.equal(args[args.indexOf('--tools') + 1], 'Read,Glob,Grep');
+    assert.equal(args[args.indexOf('--tools') + 1], 'Read,Glob,Grep,Bash');
+    assert.ok(args.includes('--allowed-tools'));
+    assert.match(args[args.indexOf('--allowed-tools') + 1] ?? '', /Bash\(node \/abs\/cli\.js monitor \*\)/);
+    assert.ok(args.includes('--permission-mode'));
+    assert.equal(args[args.indexOf('--permission-mode') + 1], 'dontAsk');
     assert.ok(!args.includes('--dangerously-skip-permissions'));
     assert.ok(!args.includes('--disable-slash-commands'), '--disable-slash-commands would also disable skills; harness must not set it');
     assert.ok(!args.includes('--add-dir'), '--add-dir would scan target workspace for project skills/commands/agents/hooks; harness must not set it');
-    assert.ok(!args.includes('--allowed-tools'), '--allowed-tools only pre-approves; it must not be the restriction surface');
     assert.deepStrictEqual(args.slice(-3), ['--print', '--output-format', 'json'], 'passthrough args appended last');
   });
 });
@@ -248,8 +328,9 @@ describe('Claude launcher leak-proof tests', () => {
     // Pre-existing non-orchestrate skill in the same source root must not leak.
     await mkdir(join(skillsPath, 'review'), { recursive: true });
     await writeFile(join(skillsPath, 'review', 'SKILL.md'), '---\nname: review\n---\n');
+    const stateDir = join(cwd, 'claude-state');
 
-    const parsed = parseClaudeLauncherArgs(['--cwd', cwd, '--skills', skillsPath], {}, cwd);
+    const parsed = parseClaudeLauncherArgs(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir], {}, cwd);
     assert.equal(parsed.ok, true);
     if (!parsed.ok) return;
     const built = await buildClaudeEnvelope({
@@ -289,23 +370,41 @@ describe('Claude launcher leak-proof tests', () => {
       // against. The supervisor reads the target workspace only indirectly, by
       // dispatching worker runs with cwd = target via mcp__agent-orchestrator__start_run.
       assert.ok(!built.spawnArgs.includes('--add-dir'), 'harness must not pass --add-dir; would leak target .claude/* into discovery');
-      // No --allowed-tools (it only pre-approves; doesn't restrict availability).
-      assert.ok(!built.spawnArgs.includes('--allowed-tools'), 'harness must not rely on --allowed-tools to restrict availability');
-      // --tools restricts built-in availability to read-only tools.
-      assert.equal(built.spawnArgs[built.spawnArgs.indexOf('--tools') + 1], 'Read,Glob,Grep');
-      // settings.deny includes Bash (defense in depth, in case --tools semantics ever loosen).
-      assert.ok(settings.permissions.deny.includes('Bash'), 'settings.deny must include Bash');
-      // HOME, XDG_CONFIG_HOME, CLAUDE_CONFIG_DIR are redirected so user-level state is unreachable.
+      // --tools restricts built-in availability to read-only tools plus Bash
+      // for the pinned monitor. --allowed-tools pre-approves only that Bash
+      // pattern and safe orchestrator MCP tools, while dontAsk denies anything
+      // else instead of prompting.
+      assert.equal(built.spawnArgs[built.spawnArgs.indexOf('--tools') + 1], 'Read,Glob,Grep,Bash');
+      assert.ok(built.spawnArgs.includes('--allowed-tools'));
+      assert.match(built.spawnArgs[built.spawnArgs.indexOf('--allowed-tools') + 1] ?? '', /Bash\(.* monitor \*\)/);
+      assert.doesNotMatch(built.spawnArgs[built.spawnArgs.indexOf('--allowed-tools') + 1] ?? '', /mcp__agent-orchestrator__wait_for_any_run/);
+      assert.doesNotMatch(built.spawnArgs[built.spawnArgs.indexOf('--allowed-tools') + 1] ?? '', /mcp__agent-orchestrator__wait_for_run/);
+      assert.equal(built.spawnArgs[built.spawnArgs.indexOf('--permission-mode') + 1], 'dontAsk');
+      assert.equal(settings.permissions.deny.includes('Bash'), false, 'bare Bash deny would shadow the pinned monitor allow rule');
+      // HOME, XDG_CONFIG_HOME, CLAUDE_CONFIG_DIR are redirected to durable
+      // orchestrator-owned state, not the user's normal home or the stable
+      // workspace envelope.
       assert.notEqual(built.spawnEnv.HOME, process.env.HOME);
-      assert.equal(built.spawnEnv.HOME, join(built.envelopeDir, 'home'));
-      assert.equal(built.spawnEnv.CLAUDE_CONFIG_DIR, join(built.envelopeDir, 'claude-config'));
-      // System prompt clarifies that Bash is unavailable and points to the standalone monitor CLI for user shells.
+      assert.equal(built.spawnEnv.HOME, join(stateDir, 'home'));
+      assert.equal(built.spawnEnv.CLAUDE_CONFIG_DIR, join(stateDir, 'home', '.claude'));
+      assert.equal(built.spawnEnv.NO_COLOR, undefined, 'interactive Claude supervisor must inherit terminal color behavior');
+      assert.notEqual(built.spawnEnv.HOME, join(built.envelopeDir, 'home'), 'Claude auth state must live outside the stable workspace envelope');
+      // System prompt teaches the supervisor to launch the pinned monitor as
+      // the only blocking wait path.
       const promptText = built.systemPrompt;
-      assert.match(promptText, /Bash is not available inside the envelope/);
-      assert.match(promptText, /standalone CLI is:.* monitor <run_id>/);
-      assert.equal(/Bash run_in_background/i.test(promptText), false, 'prompt must not instruct supervisor to use Bash run_in_background');
+      assert.match(promptText, /Bash run_in_background: true/);
+      assert.match(promptText, /monitor <run_id> --json-line/);
+      assert.match(promptText, /For each active run, use exactly one active wait mechanism at a time/);
+      assert.match(promptText, /mcp__agent-orchestrator__get_run_progress first/);
+      assert.match(promptText, /Never use Bash, jq, cat, head, tail, grep, rg, sed, awk, or Claude Code tool-result files/);
+      assert.match(promptText, /While a Bash monitor is active for a run, do not call any MCP blocking wait tool/);
+      assert.match(promptText, /If you inherit active run_ids without live monitor handles.*launch a new pinned Bash monitor/s);
+      assert.match(promptText, /Do not call wait_for_any_run or wait_for_run in the Claude supervisor/);
+      assert.doesNotMatch(promptText, /^- mcp__agent-orchestrator__wait_for_any_run$/m);
+      assert.doesNotMatch(promptText, /^- mcp__agent-orchestrator__wait_for_run$/m);
     } finally {
       await built.cleanup();
     }
+    assert.equal((await stat(stateDir)).isDirectory(), true, 'durable Claude state must survive envelope cleanup');
   });
 });

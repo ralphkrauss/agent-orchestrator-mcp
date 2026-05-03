@@ -1,10 +1,11 @@
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { cp, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveBinary } from '../backend/common.js';
 import { getBackendStatus } from '../diagnostics.js';
+import { ensureSecureRoot, resolveStoreRoot } from '../runStore.js';
 import { defaultWorkerProfilesFile } from '../workerRouting.js';
 import {
   createWorkerCapabilityCatalog,
@@ -19,7 +20,7 @@ import {
 } from './config.js';
 import { discoverClaudeSurface, summarizeReport, type ClaudeSurfaceReport } from './discovery.js';
 import { resolveMonitorPin } from './monitorPin.js';
-import { CLAUDE_SUPERVISOR_BUILTIN_TOOLS, stringifyClaudeSupervisorSettings } from './permission.js';
+import { buildClaudeAllowedToolsList, CLAUDE_SUPERVISOR_BUILTIN_TOOLS, stringifyClaudeSupervisorSettings } from './permission.js';
 import { validateClaudePassthroughArgs } from './passthrough.js';
 import { curateOrchestrateSkills } from './skills.js';
 
@@ -29,6 +30,7 @@ export interface ParsedClaudeLauncherArgs {
   profilesJson: string | null;
   manifestPath: string;
   skillsPath: string;
+  stateDir: string;
   claudeBinary: string;
   printConfig: boolean;
   printDiscovery: boolean;
@@ -54,6 +56,7 @@ export function parseClaudeLauncherArgs(
     || null;
   let profilesJson: string | null = env.AGENT_ORCHESTRATOR_CLAUDE_PROFILES_JSON || null;
   let skillsPath: string | null = env.AGENT_ORCHESTRATOR_CLAUDE_SKILLS_PATH || null;
+  let stateDir: string | null = env.AGENT_ORCHESTRATOR_CLAUDE_STATE_DIR || null;
   let claudeBinary = env.AGENT_ORCHESTRATOR_CLAUDE_BIN || env.CLAUDE_BIN || 'claude';
   let printConfig = false;
   let printDiscovery = false;
@@ -77,6 +80,8 @@ export function parseClaudeLauncherArgs(
         profilesJson = readOptionValue(ownArgs, ++index, arg);
       } else if (arg === '--skills' || arg === '--orchestration-skills') {
         skillsPath = readOptionValue(ownArgs, ++index, arg);
+      } else if (arg === '--state-dir') {
+        stateDir = readOptionValue(ownArgs, ++index, arg);
       } else if (arg === '--claude-binary') {
         claudeBinary = readOptionValue(ownArgs, ++index, arg);
       } else {
@@ -91,6 +96,8 @@ export function parseClaudeLauncherArgs(
   const defaultProfilesPath = defaultWorkerProfilesFile(env);
   const resolvedProfilesFile = resolve(resolvedCwd, profilesFile ?? defaultProfilesPath);
   const resolvedSkillsPath = resolve(resolvedCwd, skillsPath ?? '.agents/skills');
+  const defaultStateDir = join(env.AGENT_ORCHESTRATOR_HOME || resolveStoreRoot(), 'claude-supervisor');
+  const resolvedStateDir = resolve(defaultCwd, stateDir ?? defaultStateDir);
   return {
     ok: true,
     value: {
@@ -99,6 +106,7 @@ export function parseClaudeLauncherArgs(
       profilesJson,
       manifestPath: resolvedProfilesFile,
       skillsPath: resolvedSkillsPath,
+      stateDir: resolvedStateDir,
       claudeBinary,
       printConfig,
       printDiscovery,
@@ -120,6 +128,10 @@ export interface BuiltClaudeEnvelope {
   mcpConfigPath: string;
   systemPromptPath: string;
   skillsRoot: string;
+  stateDir: string;
+  stateHome: string;
+  stateXdgConfigHome: string;
+  stateClaudeConfigDir: string;
   systemPrompt: string;
   settingsContent: string;
   mcpConfigContent: string;
@@ -208,6 +220,7 @@ Options:
   --manifest <path>                  Compatibility alias for --profiles-file.
   --profiles-json <json>             Inline worker profiles manifest.
   --skills <path>                    Source skill root. Defaults to .agents/skills (orchestrate-* only is exposed).
+  --state-dir <path>                 Durable Claude supervisor state (auth + stable workspace envelopes). Defaults to \${AGENT_ORCHESTRATOR_HOME:-~/.agent-orchestrator}/claude-supervisor.
   --claude-binary <path>             Defaults to claude on PATH.
   --print-discovery                  Print the Claude binary compatibility report and exit.
   --print-config                     Print the generated supervisor envelope (system prompt, settings, mcp) and exit.
@@ -231,6 +244,7 @@ Environment fallbacks:
   AGENT_ORCHESTRATOR_CLAUDE_PROFILES_JSON
   AGENT_ORCHESTRATOR_CLAUDE_MANIFEST
   AGENT_ORCHESTRATOR_CLAUDE_SKILLS_PATH
+  AGENT_ORCHESTRATOR_CLAUDE_STATE_DIR
   AGENT_ORCHESTRATOR_CLAUDE_BIN
   AGENT_ORCHESTRATOR_BIN (override the pinned monitor binary)
 `;
@@ -244,24 +258,27 @@ export async function buildClaudeEnvelope(input: {
   discovery?: ClaudeSurfaceReport;
 }): Promise<BuiltClaudeEnvelope> {
   const { options, env, catalog, profilesResult } = input;
-  const envelopeDir = await mkdtemp(join(tmpdir(), 'agent-orchestrator-claude-'));
-  const ephemeralHome = join(envelopeDir, 'home');
-  const ephemeralXdg = join(envelopeDir, 'xdg-config');
-  const ephemeralClaudeConfig = join(envelopeDir, 'claude-config');
-  // Skills live under the envelope's own .claude/skills/ so Claude Code's
+  await ensureSecureRoot(options.stateDir);
+  const envelopeDir = await stableClaudeEnvelopeDir(options.stateDir, options.cwd);
+  const stateHome = join(options.stateDir, 'home');
+  const stateXdgConfigHome = join(stateHome, '.config');
+  const stateClaudeConfigDir = join(stateHome, '.claude');
+  // Skills live under the stable envelope's own .claude/skills/ so Claude Code's
   // cwd-rooted skill discovery picks them up when the supervisor runs with
   // cwd = envelopeDir. The target workspace is intentionally not exposed via
   // --add-dir (would scan target's .claude/* into discovery); the supervisor
   // reaches the target only indirectly by dispatching worker runs with
   // cwd = <target> via mcp__agent-orchestrator__start_run.
-  const ephemeralProjectClaude = join(envelopeDir, '.claude');
-  const ephemeralSkillRoot = join(ephemeralProjectClaude, 'skills');
+  const projectClaude = join(envelopeDir, '.claude');
+  const ephemeralSkillRoot = join(projectClaude, 'skills');
+  await resetClaudeProjectDiscoverySurface(envelopeDir);
   await Promise.all([
-    mkdir(ephemeralHome, { recursive: true, mode: 0o700 }),
-    mkdir(ephemeralXdg, { recursive: true, mode: 0o700 }),
-    mkdir(ephemeralClaudeConfig, { recursive: true, mode: 0o700 }),
-    mkdir(ephemeralProjectClaude, { recursive: true, mode: 0o700 }),
+    mkdir(stateHome, { recursive: true, mode: 0o700 }),
+    mkdir(stateXdgConfigHome, { recursive: true, mode: 0o700 }),
+    mkdir(stateClaudeConfigDir, { recursive: true, mode: 0o700 }),
+    mkdir(projectClaude, { recursive: true, mode: 0o700 }),
   ]);
+  await migrateLegacyClaudeConfigDir(join(options.stateDir, 'claude-config'), stateClaudeConfigDir);
   const skills = await curateOrchestrateSkills({
     sourceSkillRoot: options.skillsPath,
     ephemeralSkillRoot,
@@ -293,24 +310,29 @@ export async function buildClaudeEnvelope(input: {
     mcpConfigPath,
     systemPromptPath,
     builtinTools: [...CLAUDE_SUPERVISOR_BUILTIN_TOOLS],
+    allowedTools: buildClaudeAllowedToolsList({
+      monitorBashAllowlistPattern: monitorPin.bash_allowlist_pattern,
+    }),
     passthrough: options.claudeArgs,
   });
   const spawnEnv: NodeJS.ProcessEnv = {
     ...env,
-    HOME: ephemeralHome,
-    XDG_CONFIG_HOME: ephemeralXdg,
-    CLAUDE_CONFIG_DIR: ephemeralClaudeConfig,
-    NO_COLOR: env.NO_COLOR ?? '1',
+    AGENT_ORCHESTRATOR_HOME: env.AGENT_ORCHESTRATOR_HOME || resolveStoreRoot(),
+    HOME: stateHome,
+    XDG_CONFIG_HOME: stateXdgConfigHome,
+    CLAUDE_CONFIG_DIR: stateClaudeConfigDir,
   };
-  const cleanup = async () => {
-    await rm(envelopeDir, { recursive: true, force: true });
-  };
+  const cleanup = async () => undefined;
   return {
     envelopeDir,
     settingsPath,
     mcpConfigPath,
     systemPromptPath,
     skillsRoot: skills.ephemeralRoot,
+    stateDir: options.stateDir,
+    stateHome,
+    stateXdgConfigHome,
+    stateClaudeConfigDir,
     systemPrompt: config.systemPrompt,
     settingsContent,
     mcpConfigContent,
@@ -325,19 +347,26 @@ export function buildClaudeSpawnArgs(input: {
   mcpConfigPath: string;
   systemPromptPath: string;
   builtinTools: readonly string[];
+  allowedTools: readonly string[];
   passthrough: readonly string[];
+  permissionMode?: 'dontAsk';
 }): string[] {
   // Isolation envelope (see buildClaudeEnvelope):
-  // - Spawn cwd is the ephemeral envelope, so cwd-rooted discovery (.claude/,
+  // - Spawn cwd is the stable isolated envelope, so cwd-rooted discovery (.claude/,
   //   .mcp.json, project skills/commands/agents/hooks) sees only our curated
-  //   content and not the target workspace.
+  //   content and not the target workspace. The path is stable per target
+  //   workspace so Claude trust prompts and session history are stable.
   // - --setting-sources "" disables loading of user/project/local settings.json.
-  // - HOME, XDG_CONFIG_HOME, and CLAUDE_CONFIG_DIR are redirected to ephemeral
-  //   subdirectories so the user's ~/.claude is unreachable.
-  // - --tools restricts built-in tool *availability* (this is the correct
-  //   restriction surface; --allowed-tools only pre-approves and does not
-  //   block availability). Bash, Edit, Write, WebFetch, WebSearch, Task,
-  //   NotebookEdit, and TodoWrite are intentionally NOT on this list.
+  // - HOME is redirected to a durable orchestrator-owned state directory, and
+  //   CLAUDE_CONFIG_DIR points at that HOME's .claude directory. Claude Code's
+  //   auth path is HOME/.claude, so this preserves login state across launches
+  //   without reading the user's normal ~/.claude.
+  // - --tools restricts built-in tool *availability*. Bash is present only so
+  //   the supervisor can start the pinned monitor command as a background
+  //   task; --allowed-tools and settings.permissions allow exactly that
+  //   Bash(<agent-orchestrator> monitor *) pattern and the orchestrator MCP
+  //   tools. --permission-mode dontAsk denies anything outside the allowlist
+  //   instead of surfacing permission prompts to the supervisor.
   // - --add-dir is intentionally NOT passed: Claude Code scans add-dir paths
   //   for project skills/commands/agents/hooks and CLAUDE.md, which would
   //   re-introduce target workspace .claude/* leakage. The supervisor reads
@@ -350,6 +379,8 @@ export function buildClaudeSpawnArgs(input: {
     '--setting-sources', '',
     '--append-system-prompt-file', input.systemPromptPath,
     '--tools', input.builtinTools.join(','),
+    '--allowed-tools', input.allowedTools.join(' '),
+    '--permission-mode', input.permissionMode ?? 'dontAsk',
     ...input.passthrough,
   ];
   return args;
@@ -406,11 +437,12 @@ async function spawnClaude(
   options: ParsedClaudeLauncherArgs,
   built: BuiltClaudeEnvelope,
 ): Promise<number> {
-  // Spawn cwd is the ephemeral envelope so Claude Code's cwd-rooted discovery
+  // Spawn cwd is the stable isolated envelope so Claude Code's cwd-rooted discovery
   // (project .claude/, .mcp.json, hooks, commands, agents, plugins) sees only
-  // our curated content. The target workspace is intentionally not exposed
-  // (no --add-dir); the supervisor reaches it only by dispatching worker runs
-  // with cwd = <target> via mcp__agent-orchestrator__start_run.
+  // our curated content, while trust prompts and session history are stable
+  // for the same target workspace. The target workspace is intentionally not
+  // exposed (no --add-dir); the supervisor reaches it only by dispatching
+  // worker runs with cwd = <target> via mcp__agent-orchestrator__start_run.
   void options;
   const child = spawn(binary, built.spawnArgs, {
     cwd: built.envelopeDir,
@@ -430,10 +462,64 @@ function packageCliPath(): string {
   return join(dirname(dirname(fileURLToPath(import.meta.url))), 'cli.js');
 }
 
+async function stableClaudeEnvelopeDir(stateDir: string, cwd: string): Promise<string> {
+  const root = join(stateDir, 'envelopes');
+  await ensureSecureRoot(root);
+  const canonicalCwd = await realpath(cwd).catch(() => cwd);
+  const hash = createHash('sha256').update(canonicalCwd).digest('hex').slice(0, 16);
+  const slug = sanitizePathSegment(basename(canonicalCwd) || 'workspace');
+  const envelopeDir = join(root, `${slug}-${hash}`);
+  await ensureSecureRoot(envelopeDir);
+  return envelopeDir;
+}
+
+async function resetClaudeProjectDiscoverySurface(envelopeDir: string): Promise<void> {
+  await Promise.all([
+    rm(join(envelopeDir, '.claude'), { recursive: true, force: true }),
+    rm(join(envelopeDir, '.mcp.json'), { force: true }),
+    rm(join(envelopeDir, 'CLAUDE.md'), { force: true }),
+    rm(join(envelopeDir, 'CLAUDE.local.md'), { force: true }),
+  ]);
+}
+
+function sanitizePathSegment(value: string): string {
+  const sanitized = value.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+  return sanitized.slice(0, 48) || 'workspace';
+}
+
 function readOptionValue(args: readonly string[], index: number, option: string): string {
   const value = args[index];
   if (!value) throw new Error(`${option} requires a value`);
   return value;
+}
+
+async function migrateLegacyClaudeConfigDir(sourceDir: string, targetDir: string): Promise<void> {
+  if (sourceDir === targetDir || !(await pathExists(sourceDir))) return;
+  for (const entry of [
+    '.credentials.json',
+    '.claude.json',
+    'settings.json',
+    'history.jsonl',
+    'backups',
+    'cache',
+    'plugins',
+    'projects',
+  ]) {
+    const source = join(sourceDir, entry);
+    const target = join(targetDir, entry);
+    if (await pathExists(source) && !(await pathExists(target))) {
+      await cp(source, target, { recursive: true, preserveTimestamps: true, force: false });
+    }
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export { CLAUDE_MCP_SERVER_NAME };

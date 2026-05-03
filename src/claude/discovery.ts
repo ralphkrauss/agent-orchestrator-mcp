@@ -11,21 +11,28 @@ export interface ClaudeSurfaceReport {
     setting_sources_flag: boolean;
     /**
      * `--tools` is the load-bearing built-in availability restriction. The
-     * supervisor envelope sets `--tools "Read,Glob,Grep"` so Bash/Edit/Write/
-     * etc. are unavailable as built-ins. Required.
+     * supervisor envelope sets `--tools "Read,Glob,Grep,Bash"` so Bash exists
+     * only for the pinned monitor command while Edit/Write/etc. are
+     * unavailable as built-ins. Required.
      */
     tools_flag: boolean;
     /**
-     * `--allowed-tools` only pre-approves matching patterns; it is no longer
-     * the security boundary and is therefore reported but not required.
+     * `--allowed-tools` pre-approves the pinned `Bash(<prefix> monitor *)`
+     * pattern. Required for background monitor supervision.
      */
     allowed_tools_flag: boolean;
     /**
      * `--disallowed-tools` is reported but not required. It is not used by
      * the harness because the security boundary is `--tools` (availability)
-     * + `settings.permissions.deny` (pattern denial as defense in depth).
+     * + `--allowed-tools`/settings allow + `dontAsk`.
      */
     disallowed_tools_flag: boolean;
+    /**
+     * `--permission-mode dontAsk` prevents permission prompts for unallowed
+     * tool calls. Required once Bash is part of the built-in surface for the
+     * pinned monitor.
+     */
+    permission_mode_flag: boolean;
     /**
      * `--append-system-prompt-file` is the load-bearing system-prompt
      * injection mechanism (the harness writes the supervisor prompt to an
@@ -56,12 +63,12 @@ const EXPECTED_FLAGS: { key: keyof ClaudeSurfaceReport['surfaces']; pattern: Reg
   // the --bare description as `--append-system-prompt[-file]`. Both forms
   // indicate the file variant is supported.
   { key: 'append_system_prompt_file_flag', pattern: /--append-system-prompt(?:-file|\[-file\])/, required: true },
-  // --allowed-tools / --disallowed-tools are reported only; they are not part
-  // of the security boundary because --allowed-tools only pre-approves and
-  // --disallowed-tools cannot express the inverse-of-pinned pattern we would
-  // need. Kept in the report so an operator can see what the binary advertises.
-  { key: 'allowed_tools_flag', pattern: /--allowed[Tt]ools\b|--allowed-tools\b/, required: false },
+  // --allowed-tools pre-approves the pinned Bash monitor pattern. The harness
+  // still relies on --tools for built-in availability and dontAsk for deny-by-
+  // default behavior, but this flag is required because it is passed at spawn.
+  { key: 'allowed_tools_flag', pattern: /--allowed[Tt]ools\b|--allowed-tools\b/, required: true },
   { key: 'disallowed_tools_flag', pattern: /--disallowed[Tt]ools\b|--disallowed-tools\b/, required: false },
+  { key: 'permission_mode_flag', pattern: /--permission-mode\b/, required: true },
   { key: 'system_prompt_flag', pattern: /--system-prompt\b/, required: false },
   { key: 'append_system_prompt_flag', pattern: /--append-system-prompt\b/, required: false },
   { key: 'bare_flag', pattern: /--bare\b/, required: false },

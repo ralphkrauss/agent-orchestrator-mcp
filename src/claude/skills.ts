@@ -1,5 +1,5 @@
 import { constants, type Dirent } from 'node:fs';
-import { access, copyFile, mkdir, readdir } from 'node:fs/promises';
+import { access, copyFile, mkdir, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 export interface ResolvedClaudeSkills {
@@ -12,6 +12,7 @@ export async function curateOrchestrateSkills(input: {
   sourceSkillRoot: string;
   ephemeralSkillRoot: string;
 }): Promise<ResolvedClaudeSkills> {
+  await rm(input.ephemeralSkillRoot, { recursive: true, force: true });
   await mkdir(input.ephemeralSkillRoot, { recursive: true, mode: 0o700 });
   const orchestrationSkillNames = await listOrchestrationSkills(input.sourceSkillRoot);
   for (const name of orchestrationSkillNames) {

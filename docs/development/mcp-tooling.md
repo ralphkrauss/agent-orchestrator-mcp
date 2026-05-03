@@ -97,37 +97,58 @@ subcommands and any option token after `run`, including `--agent`, `--attach`,
 ### Claude Code orchestration launcher
 
 A second supervisor harness ships in this repo and is positioned as the
-**recommended rich-feature** harness when its primitives are needed (Claude
-Code's native push notifications and strong isolation flags such as
-`--strict-mcp-config`, `--setting-sources ""`, `--tools`, and ephemeral
-skill / settings / MCP injection). The OpenCode harness above remains a fully
-supported peer; both are documented side-by-side and there is no deprecation:
+**recommended rich-feature** harness when its primitives are needed (strong
+isolation flags such as `--strict-mcp-config`, `--setting-sources ""`,
+`--tools`, pinned background Bash monitors, generated skill / settings / MCP
+injection, stable isolated Claude project paths, and daemon-owned durable
+notification reconciliation). The OpenCode
+harness above remains a fully supported peer; both are documented side-by-side
+and there is no deprecation:
 
 ```bash
 agent-orchestrator claude
 agent-orchestrator-claude
 ```
 
-The Claude launcher builds a per-launch ephemeral envelope under the system
-temp directory and spawns `claude` with `cwd = <envelope>`. The envelope
-contains a curated `.claude/skills/` (orchestrate-* only), a deny-by-default
-`settings.json`, and an `mcp.json` exposing only `agent-orchestrator`. The
-spawn passes `--strict-mcp-config`, `--setting-sources ""`, `--tools
-"Read,Glob,Grep"` (so the only available built-in tools are the read-only
-inspection tools), `--append-system-prompt-file`, and redirects `HOME`,
-`XDG_CONFIG_HOME`, and `CLAUDE_CONFIG_DIR` to ephemeral subdirectories. The
-launcher never passes `--dangerously-skip-permissions`, does not use
+The Claude launcher builds a stable isolated envelope under
+`${AGENT_ORCHESTRATOR_HOME:-$HOME/.agent-orchestrator}/claude-supervisor/envelopes/<workspace>-<hash>`
+and spawns `claude` with `cwd = <envelope>`. The hash is derived from the real
+target workspace path, so repeated launches for the same `--cwd` use the same
+Claude project path for trust prompts and supervisor session history. The
+target workspace itself is still not exposed as Claude's cwd. On every launch,
+the launcher removes stale project-discovery surfaces from the envelope
+(`.claude/`, `.mcp.json`, `CLAUDE.md`) and regenerates a curated
+`.claude/skills/` (orchestrate-* only), a deny-by-default `settings.json`, and
+an `mcp.json` exposing only `agent-orchestrator`. Claude's own account/auth
+state is redirected to a durable orchestrator-owned state directory, defaulting to
+`${AGENT_ORCHESTRATOR_HOME:-$HOME/.agent-orchestrator}/claude-supervisor`, so a
+supervisor login persists without exposing the user's normal `~/.claude`. The
+durable `HOME` contains `.claude` because Claude Code account auth is read from
+`HOME/.claude`; `AGENT_ORCHESTRATOR_HOME` remains explicit so the embedded MCP
+server still uses the normal daemon store. The spawn passes
+`--strict-mcp-config`, `--setting-sources ""`, `--tools
+"Read,Glob,Grep,Bash"` (read-only inspection tools plus Bash for the pinned
+monitor command), `--allowed-tools` with
+`Bash(<node> <agent-orchestrator> monitor *)` plus the Claude-specific safe MCP
+allowlist, `--permission-mode dontAsk`, `--append-system-prompt-file`, and
+redirects `HOME`, `XDG_CONFIG_HOME`, and `CLAUDE_CONFIG_DIR` to that durable
+state directory. MCP blocking wait tools are denied for Claude. The launcher never passes
+`--dangerously-skip-permissions`, does not use
 `--disable-slash-commands` (that flag would also disable orchestrate-* skill
 discovery), does not use `--add-dir` (Claude scans add-dir paths for project
-`.claude/*` and `CLAUDE.md` which would re-introduce target leakage), and does
-not use `--allowed-tools` (it only pre-approves; the correct availability
-restriction surface is `--tools`).
+`.claude/*` and `CLAUDE.md` which would re-introduce target leakage), and keeps
+user-supplied `--tools`, `--allowed-tools`, and `--permission-mode` forbidden
+because the harness owns those surfaces.
 
 Because the supervisor cannot directly read files from the target workspace,
 worker runs are dispatched with `cwd = <target workspace>` via
 `mcp__agent-orchestrator__start_run`; workers have full access in their own
-session. The supervisor reconciles via `get_run_status`, `get_run_events`,
-and `get_run_result`.
+session. The supervisor checks progress through `get_run_progress`, reconciles
+lifecycle through `get_run_status`, and fetches terminal output through
+`get_run_result`. It uses `get_run_events` only when raw backend events are
+explicitly needed, with a small limit and an `after_sequence` cursor. The
+supervisor must not inspect Claude Code internal `.claude/projects` or
+`tool-results` files.
 
 Inspect the discovery report and the generated envelope without spawning
 Claude:
@@ -149,14 +170,30 @@ Both harnesses share daemon-owned, backend-agnostic notification primitives:
   include_acked?, limit? })` returns durable notifications since a
   lexicographic global cursor for reconciliation after disconnect.
 - `ack_run_notification({ notification_id })` is idempotent.
-- `agent-orchestrator monitor <run_id>` is a one-shot CLI for use from a
-  user shell (e.g. as a background `&`-suffixed process). The Claude harness
-  itself does not invoke it — Bash is not part of the supervisor's tool
-  surface, and run supervision inside the envelope uses bounded
-  `wait_for_any_run` polls. The CLI exits with `0` completed, `1`
+- `get_run_progress({ run_id, after_sequence?, limit?, max_text_chars? })`
+  returns a compact, bounded progress summary with recent event summaries and
+  extracted text snippets. Supervisors should prefer it for user-facing
+  progress/status checks instead of fetching large raw event pages or parsing
+  client tool-result files.
+- `agent-orchestrator monitor <run_id>` is a one-shot CLI used by the Claude
+  harness through pinned `Bash run_in_background: true`, and it can also be
+  run from a user shell. The CLI prints exactly one JSON line when a terminal
+  or fatal-error notification arrives; it is not a live event stream. The CLI
+  exits with `0` completed, `1`
   failed/orphaned, `2` cancelled, `3` timed_out, `10` fatal_error, `4`
   unknown run, `5` daemon unavailable, `6` argument error, and prints
   exactly one JSON line for the wake notification.
+- Claude uses one blocking wait path: MCP starts/fetches state, the Bash
+  monitor is the normal current-turn wake path, and
+  `list_run_notifications` is cross-turn reconciliation. If a later turn
+  inherits an active run without a live monitor handle, Claude relaunches the
+  same pinned monitor, using `--since <notification_id>` when it has a cursor.
+  Claude is not allowlisted for MCP blocking wait tools (`wait_for_any_run` or
+  `wait_for_run`).
+- OpenCode uses MCP-only supervision: `wait_for_any_run` is the normal
+  current-turn wake path, `wait_for_run` is compatibility fallback, and
+  `list_run_notifications` is cross-turn reconciliation. OpenCode does not
+  use Bash, `Bash run_in_background`, or `agent-orchestrator monitor`.
 - The MCP server also relays an advisory `notifications/run/changed` push
   hint with payload `{ run_id, notification_id, kind, status }`. The hint is
   optional; the durable journal under the run-store root is authoritative.
@@ -282,11 +319,12 @@ Guardrails:
 - prefer explicit `cwd` values
 - avoid concurrent worker runs against the same dirty working tree unless that
   is the task
-- supervise long-running workers with bounded `wait_for_run` calls and adaptive
-  check-ins: first around 30 seconds, then about 2 minutes, 5 minutes, and a
-  10-15 minute ceiling while `last_activity_at` keeps advancing
-- inspect `latest_error`, `timeout_reason`, `terminal_reason`, and recent events
-  before backing off; fatal backend errors should be reported or routed
+- supervise long-running workers with the harness-specific path documented
+  above: Claude uses only the pinned Bash monitor for blocking waits, OpenCode
+  and generic notification-aware MCP clients use bounded `wait_for_any_run`,
+  and `wait_for_run` is only a compatibility fallback for single-run clients
+- inspect `latest_error`, `timeout_reason`, `terminal_reason`, and
+  `get_run_progress` before backing off; fatal backend errors should be reported or routed
   immediately instead of waiting for the idle timeout
 - use `idle_timeout_seconds` for quiet-but-legitimate work; reserve
   `execution_timeout_seconds` for an explicit hard elapsed-time cap

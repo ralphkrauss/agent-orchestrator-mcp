@@ -168,6 +168,94 @@ process.stdin.on('end', () => {
     assert.ok(meta.last_activity_at);
   });
 
+  it('does not let Claude result.modelUsage sidecar models clobber the first observed model', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-process-'));
+    const cli = join(root, 'worker.js');
+    await writeFile(cli, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({
+    type: 'system',
+    subtype: 'init',
+    session_id: 'session-1',
+    model: 'claude-opus-4-7[1m]'
+  }));
+  console.log(JSON.stringify({
+    type: 'assistant',
+    session_id: 'session-1',
+    message: {
+      model: 'claude-opus-4-7',
+      content: [{ type: 'text', text: 'Running and ready.' }]
+    }
+  }));
+  console.log(JSON.stringify({
+    type: 'result',
+    subtype: 'success',
+    result: 'Running and ready.',
+    session_id: 'session-1',
+    modelUsage: {
+      'claude-haiku-4-5-20251001': { inputTokens: 357, outputTokens: 11, costUSD: 0.0004 },
+      'claude-opus-4-7[1m]': { inputTokens: 6, outputTokens: 10, costUSD: 0.0838 }
+    }
+  }));
+  process.exit(0);
+});
+`);
+    await chmod(cli, 0o755);
+
+    const store = new RunStore(root);
+    const run = await store.createRun({ backend: 'claude', cwd: root, model_source: 'backend_default' });
+    const manager = new ProcessManager(store);
+    const managed = await manager.start(run.run_id, new ClaudeBackend(), {
+      command: cli,
+      args: [],
+      cwd: root,
+      stdinPayload: 'finish',
+    });
+
+    await managed.completion;
+    const meta = await store.loadMeta(run.run_id);
+    assert.equal(meta.observed_model, 'claude-opus-4-7[1m]');
+    assert.equal(meta.model, 'claude-opus-4-7[1m]');
+  });
+
+  it('uses the highest-cost Claude modelUsage entry when no explicit model is emitted', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-process-'));
+    const cli = join(root, 'worker.js');
+    await writeFile(cli, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({
+    type: 'result',
+    subtype: 'success',
+    result: 'done',
+    session_id: 'session-1',
+    modelUsage: {
+      'claude-haiku-4-5-20251001': { inputTokens: 357, outputTokens: 11, costUSD: 0.0004 },
+      'claude-opus-4-7[1m]': { inputTokens: 6, outputTokens: 10, costUSD: 0.0838 }
+    }
+  }));
+  process.exit(0);
+});
+`);
+    await chmod(cli, 0o755);
+
+    const store = new RunStore(root);
+    const run = await store.createRun({ backend: 'claude', cwd: root, model_source: 'backend_default' });
+    const manager = new ProcessManager(store);
+    const managed = await manager.start(run.run_id, new ClaudeBackend(), {
+      command: cli,
+      args: [],
+      cwd: root,
+      stdinPayload: 'finish',
+    });
+
+    await managed.completion;
+    const meta = await store.loadMeta(run.run_id);
+    assert.equal(meta.observed_model, 'claude-opus-4-7[1m]');
+    assert.equal(meta.model, 'claude-opus-4-7[1m]');
+  });
+
   it('does not promote benign stderr error text when a worker succeeds', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-process-'));
     const cli = join(root, 'worker.js');

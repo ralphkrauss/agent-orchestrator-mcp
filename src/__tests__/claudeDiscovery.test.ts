@@ -41,6 +41,7 @@ Options:
   --mcp-config <configs...>                         Load MCP servers from JSON
   --output-format <format>                          Output format
   -p, --print                                       Print response and exit
+  --permission-mode <mode>                          Permission mode to use for the session
   --setting-sources <sources>                       Comma-separated list of setting sources to load
   --settings <file-or-json>                         Path to a settings JSON file
   --strict-mcp-config                               Only use MCP servers from --mcp-config
@@ -51,12 +52,14 @@ Options:
 `;
 
 describe('Claude surface discovery', () => {
-  it('reports recommended_path=isolated_envelope and exposes the tools_flag/append_system_prompt_file_flag surfaces when the binary advertises every required flag', async () => {
+  it('reports recommended_path=isolated_envelope and exposes the required monitor-related surfaces when the binary advertises every required flag', async () => {
     const binary = await fakeClaudeBinary(FULL_HELP);
     const report = await discoverClaudeSurface(binary);
     assert.equal(report.recommended_path, 'isolated_envelope');
     assert.deepStrictEqual(report.errors, []);
     assert.equal(report.surfaces.tools_flag, true, '--tools surface must be detected and required');
+    assert.equal(report.surfaces.allowed_tools_flag, true, '--allowed-tools surface must be detected and required');
+    assert.equal(report.surfaces.permission_mode_flag, true, '--permission-mode surface must be detected and required');
     assert.equal(report.surfaces.append_system_prompt_file_flag, true);
     assert.equal(report.surfaces.mcp_config_flag, true);
     assert.equal(report.surfaces.strict_mcp_config_flag, true);
@@ -66,13 +69,31 @@ describe('Claude surface discovery', () => {
     assert.match(report.version ?? '', /99\.0\.0/);
   });
 
-  it('downgrades recommended_path to unsupported when --tools is missing, even if --allowed-tools / --disallowed-tools are present', async () => {
+  it('downgrades recommended_path to unsupported when --tools is missing, even if --allowed-tools / --permission-mode are present', async () => {
     const helpWithoutTools = FULL_HELP.replace(/^.*--tools <tools.*$/m, '');
     const binary = await fakeClaudeBinary(helpWithoutTools);
     const report = await discoverClaudeSurface(binary);
     assert.equal(report.surfaces.tools_flag, false);
     assert.equal(report.recommended_path, 'unsupported', '--tools is the load-bearing availability restrictor; missing it must downgrade the report');
     assert.ok(report.errors.some((line) => line.includes('tools_flag')), 'errors must call out tools_flag specifically');
+  });
+
+  it('downgrades recommended_path to unsupported when --allowed-tools is missing because the pinned Bash monitor cannot be pre-approved', async () => {
+    const helpWithoutAllowed = FULL_HELP.replace(/^.*--allowedTools.*$/m, '');
+    const binary = await fakeClaudeBinary(helpWithoutAllowed);
+    const report = await discoverClaudeSurface(binary);
+    assert.equal(report.surfaces.allowed_tools_flag, false);
+    assert.equal(report.recommended_path, 'unsupported');
+    assert.ok(report.errors.some((line) => line.includes('allowed_tools_flag')), 'errors must call out allowed_tools_flag specifically');
+  });
+
+  it('downgrades recommended_path to unsupported when --permission-mode is missing because non-allowlisted Bash would prompt', async () => {
+    const helpWithoutPermissionMode = FULL_HELP.replace(/^.*--permission-mode.*$/m, '');
+    const binary = await fakeClaudeBinary(helpWithoutPermissionMode);
+    const report = await discoverClaudeSurface(binary);
+    assert.equal(report.surfaces.permission_mode_flag, false);
+    assert.equal(report.recommended_path, 'unsupported');
+    assert.ok(report.errors.some((line) => line.includes('permission_mode_flag')), 'errors must call out permission_mode_flag specifically');
   });
 
   it('downgrades to unsupported when --append-system-prompt-file is missing (the supervisor system prompt cannot be injected)', async () => {
@@ -83,22 +104,22 @@ describe('Claude surface discovery', () => {
     assert.equal(report.recommended_path, 'unsupported');
   });
 
-  it('keeps recommended_path=isolated_envelope when --allowed-tools is missing, because the security boundary is --tools (allowed-tools/disallowed-tools are reported but optional)', async () => {
-    const helpWithoutAllowed = FULL_HELP
-      .replace(/^.*--allowedTools.*$/m, '')
-      .replace(/^.*--disallowedTools.*$/m, '');
-    const binary = await fakeClaudeBinary(helpWithoutAllowed);
+  it('keeps recommended_path=isolated_envelope when --disallowed-tools is missing, because explicit denies live in settings', async () => {
+    const helpWithoutDisallowed = FULL_HELP.replace(/^.*--disallowedTools.*$/m, '');
+    const binary = await fakeClaudeBinary(helpWithoutDisallowed);
     const report = await discoverClaudeSurface(binary);
-    assert.equal(report.surfaces.allowed_tools_flag, false);
+    assert.equal(report.surfaces.allowed_tools_flag, true);
     assert.equal(report.surfaces.disallowed_tools_flag, false);
-    assert.equal(report.recommended_path, 'isolated_envelope', '--allowed-tools/--disallowed-tools are no longer required for isolation');
+    assert.equal(report.recommended_path, 'isolated_envelope', '--disallowed-tools is not required because deny rules live in settings');
   });
 
-  it('summarizeReport mentions the new tools_flag and append_system_prompt_file_flag surfaces', async () => {
+  it('summarizeReport mentions the monitor-related required surfaces', async () => {
     const binary = await fakeClaudeBinary(FULL_HELP);
     const report = await discoverClaudeSurface(binary);
     const text = summarizeReport(report);
     assert.match(text, /tools_flag: present/);
+    assert.match(text, /allowed_tools_flag: present/);
+    assert.match(text, /permission_mode_flag: present/);
     assert.match(text, /append_system_prompt_file_flag: present/);
   });
 });

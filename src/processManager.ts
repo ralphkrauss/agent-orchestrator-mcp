@@ -258,8 +258,8 @@ export class ProcessManager {
         ...meta,
         session_id: parsed.sessionId ? meta.session_id ?? parsed.sessionId : meta.session_id,
         observed_session_id: parsed.sessionId ?? meta.observed_session_id,
-        observed_model: observedModel ?? meta.observed_model,
-        model: meta.model ?? observedModel,
+        observed_model: chooseObservedModel(meta.observed_model, observedModel),
+        model: chooseRunModel(meta.model, meta.model_source, observedModel),
         model_source: !meta.model && observedModel && meta.model_source === 'legacy_unknown' ? 'backend_default' : meta.model_source,
       }));
     }
@@ -498,7 +498,43 @@ function extractObservedModel(raw: unknown): string | null {
 
 function firstModelUsageKey(modelUsage: Record<string, unknown> | null): string | null {
   if (!modelUsage) return null;
-  return Object.keys(modelUsage)[0] ?? null;
+  let best: { model: string; score: number } | null = null;
+  for (const [model, usage] of Object.entries(modelUsage)) {
+    const score = modelUsageScore(usage);
+    if (!best || score > best.score) best = { model, score };
+  }
+  return best?.model ?? Object.keys(modelUsage)[0] ?? null;
+}
+
+function modelUsageScore(usage: unknown): number {
+  const rec = record(usage);
+  if (!rec) return 0;
+  const cost = numberValue(rec.costUSD ?? rec.costUsd ?? rec.cost_usd);
+  if (cost !== null) return cost;
+  const inputTokens = numberValue(rec.inputTokens ?? rec.input_tokens) ?? 0;
+  const outputTokens = numberValue(rec.outputTokens ?? rec.output_tokens) ?? 0;
+  return inputTokens + outputTokens;
+}
+
+function chooseRunModel(current: string | null, source: RunMeta['model_source'], incoming: string | null): string | null {
+  if (!incoming) return current;
+  if (!current) return incoming;
+  return source === 'backend_default' ? chooseObservedModel(current, incoming) : current;
+}
+
+function chooseObservedModel(current: string | null, incoming: string | null): string | null {
+  if (!incoming) return current;
+  if (!current) return incoming;
+  return isMoreSpecificModelName(current, incoming) ? incoming : current;
+}
+
+function isMoreSpecificModelName(current: string, incoming: string): boolean {
+  if (current === incoming) return false;
+  const currentBase = current.replace(/\[[^\]]+\]$/, '');
+  const incomingBase = incoming.replace(/\[[^\]]+\]$/, '');
+  return currentBase === incomingBase
+    && !/\[[^\]]+\]$/.test(current)
+    && /\[[^\]]+\]$/.test(incoming);
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -507,6 +543,13 @@ function record(value: unknown): Record<string, unknown> | null {
 
 function stringValue(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function numberValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 export function terminateProcessTree(

@@ -92,6 +92,29 @@ export const tools = [
     },
   },
   {
+    name: 'get_run_progress',
+    description: 'Get a compact, bounded progress summary for a run. Prefer this for user-facing progress checks instead of reading raw event pages or parsing client tool-result files.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        run_id: { type: 'string' },
+        after_sequence: {
+          type: 'number',
+          description: 'Optional event cursor. When omitted, returns a compact tail of recent events.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum recent events to summarize. Defaults to 5 and is capped at 20.',
+        },
+        max_text_chars: {
+          type: 'number',
+          description: 'Maximum characters returned for any extracted text snippet. Defaults to 1200.',
+        },
+      },
+      required: ['run_id'],
+    },
+  },
+  {
     name: 'wait_for_run',
     description: 'Wait for a run to reach a terminal status, bounded by wait_seconds.',
     inputSchema: {

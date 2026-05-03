@@ -55,6 +55,28 @@ This plan covers three interleaved deliverables, sequenced **B → A → C**:
   and update the docs so both harnesses are described side-by-side with
   Claude framed as the recommended rich-feature option when available.
 
+Current implementation note: the Claude supervisor exposes `Bash` only for the
+pinned monitor command pattern
+`Bash(<node> <agent-orchestrator> monitor *)`, runs with
+`--permission-mode dontAsk`, and launches
+`agent-orchestrator monitor <run_id> --json-line` via
+`Bash run_in_background: true` after `start_run`. If a live monitor handle is
+missing, Claude relaunches the same pinned monitor, using `--since
+<notification_id>` when it has a cursor. `list_run_notifications` remains the
+cross-turn reconciliation path. The MCP blocking wait tools (`wait_for_any_run`
+and `wait_for_run`) remain registered for non-Claude clients but are not
+allowlisted for the Claude supervisor. Earlier execution-log entries that
+removed in-envelope Bash or left MCP waits as a Claude fallback are superseded
+by the latest follow-up at the end of this plan.
+
+Envelope persistence note: earlier decision text that describes a random
+per-launch temp envelope is superseded by follow-up #10. The current Claude
+supervisor cwd is a stable isolated envelope under the daemon-owned
+`claude-supervisor/envelopes/` directory, keyed by target workspace path. The
+launcher still regenerates harness-owned settings/MCP/prompt/skills and clears
+Claude discovery files before each launch, so the stable path improves trust
+and session resume without exposing the target workspace.
+
 Already in place (verified by reading the code, not assumed):
 
 - `src/backend/claude.ts` registers a Claude Code worker backend with
@@ -96,7 +118,7 @@ Sources read:
 | 5 | Monitor CLI | Add `agent-orchestrator monitor <run_id> [--json-line] [--since <notification_id>]` that blocks against the daemon until **either a `terminal` or a `fatal_error` notification** is appended for the run. Prints exactly one JSON line on stdout (`run_id`, `status`, `kind`, `terminal_reason`, `notification_id`, `latest_error`) and exits with the documented exit-code table (see CCS-5 acceptance criteria). | This is the cleanest way to leverage Claude Code's `Bash run_in_background: true` primitive: the supervisor launches one monitor per active run and the surrounding Claude Code harness signals the main thread when the bash exits. Waking on `fatal_error` as well as `terminal` matches the comment's "terminal or error state" requirement and lets the supervisor react to fatal backend failures without waiting for the worker process to terminate. | Server-only signalling (no CLI handle); using stderr instead of a clean json-line; mixing progress lines with the terminal record; waking only on `terminal` (would delay actionable error reporting). |
 | 6 | Claude is the recommended rich-feature harness; OpenCode coexists as a supported harness | Position Claude as the **recommended** orchestration harness when its richer feature set is needed (native background tasks, push notifications, strong isolation primitives). OpenCode stays a fully supported peer harness and receives compatible improvements: notification-aware supervisor prompt, parity on shared harness abstractions, dual-harness docs. There is no deprecation warning, deprecation phase, removal plan, or maintenance-only label applied to OpenCode in this plan. The OpenCode supervisor harness remains stable and supported; the existing Codex and Claude worker backends are unchanged. | Reviewer-corrected product decision (2026-05-03 retraction): the user plans to switch to Claude Code once it is ready, but explicitly wants OpenCode to remain supported and improved in parallel; no deprecation in this slice. | Deprecating OpenCode now; framing OpenCode as legacy; printing a deprecation warning; scheduling removal phases; treating OpenCode improvements as out of scope. |
 | 7 | Claude Code harness isolation boundary | The supervisor runs in a **strict isolation envelope** built ephemerally per launch under the daemon-owned state dir. Concretely: (a) a generated MCP config containing **only** the agent-orchestrator MCP server is passed via `--mcp-config <ephemeral.json>` together with `--strict-mcp-config` (CCS-7a confirms the flag; see Decision 17); (b) a generated `settings.json` is passed via the validated injection mechanism (CCS-7a) and configures permissions, the tool allowlist, and the curated skill/agents/commands roots; (c) the spawned `claude` process is started with `HOME` and `XDG_CONFIG_HOME` redirected to ephemeral dirs and with `CLAUDE_CONFIG_DIR` (or whatever variable CCS-7a confirms) pointing into the same ephemeral root, so the user's `~/.claude/` is unreadable to the supervisor; (d) project-scoped `.mcp.json`, `.claude/settings.json`, `.claude/skills/`, `.claude/commands/`, `.claude/agents/`, and `.claude/hooks/` files in the target workspace are explicitly **not** loaded — confirmed by harness leak tests; (e) `--dangerously-skip-permissions` is **never** used; (f) all ephemeral files are cleaned up on exit. Do not write into the target workspace's `.claude/` or `.mcp.json`, or into the user's `~/.claude/`. | Production-grade orchestration must not silently inherit arbitrary user MCP servers, slash commands, hooks, or skills — these can leak secrets, change tool semantics, or break the orchestration contract. The reviewer specified strict isolation and no `--dangerously-skip-permissions`. Ephemeral redirection of `HOME`/`XDG_CONFIG_HOME`/`CLAUDE_CONFIG_DIR` makes the boundary enforceable rather than merely documented. | Inheriting user/project Claude state by default; opt-out instead of opt-in for user state; using `--dangerously-skip-permissions`; making the boundary documentation-only; mutating user/workspace config; passing only `--mcp-config` without `--strict-mcp-config`. |
-| 8 | Claude Code supervisor surface | Single curated supervisor system prompt + permission/tool/MCP/skill allowlist generated by `src/claude/config.ts` and consumed by the launcher. No dependency on Claude Code's experimental sub-agent / agent-team / Task-tool behavior. Prompt teaches: profile-mode `start_run`, launching `agent-orchestrator monitor <run_id>` via `Bash run_in_background: true` (with the monitor command reaching the daemon through a known path; see Decision 23), reacting on both `terminal` and `fatal_error` wake semantics, reconciling via `wait_for_any_run` / `list_run_notifications`, bounded-wait fallback when monitors are unavailable. Tool allowlist (Decision 22) restricts which Claude Code tools the supervisor can call. | Robust on whatever Claude Code primitives are stable today. Sub-agents and agent-team behavior may be useful later but cannot be a hard dependency. | Requiring sub-agents/agent-teams; relying on Claude Code's `Task` tool semantics being stable; baking model-specific Claude Code internals into the prompt; allowing free-form tool use. |
+| 8 | Claude Code supervisor surface | Single curated supervisor system prompt + permission/tool/MCP/skill allowlist generated by `src/claude/config.ts` and consumed by the launcher. No dependency on Claude Code's experimental sub-agent / agent-team / Task-tool behavior. Prompt teaches: profile-mode `start_run`, launching `agent-orchestrator monitor <run_id>` via `Bash run_in_background: true` (with the monitor command reaching the daemon through a known path; see Decision 23), reacting on both `terminal` and `fatal_error` wake semantics, relaunching the pinned monitor with `--since <notification_id>` when a live handle is missing, and reconciling via `list_run_notifications`. Claude is not allowlisted for MCP blocking wait tools. Tool allowlist (Decision 22) restricts which Claude Code tools the supervisor can call. | Robust on whatever Claude Code primitives are stable today. Sub-agents and agent-team behavior may be useful later but cannot be a hard dependency. | Requiring sub-agents/agent-teams; relying on Claude Code's `Task` tool semantics being stable; baking model-specific Claude Code internals into the prompt; allowing free-form tool use. |
 | 9 | Persistence layout | Single daemon-owned append-only journal `notifications.jsonl` under the run-store root acts as the authoritative source of order. Each entry carries a `notification_id` that **embeds a strictly increasing daemon-global sequence number** (see Decision 13). A per-run `notifications.jsonl` file may be written as a denormalized index/optimization, but the global journal is the source of truth used for cursor reads. Acknowledgement is recorded in a sidecar `acks.jsonl` (global) so the original notification is never mutated. | Append-only matches the existing run-store style and gives durability without schema migration risk. A single global journal removes any ambiguity about cross-run ordering. | Mutating notification records in place; storing notifications inside `meta.json`; adding a SQLite dependency; using only per-run files (forces order reconstruction at read time). |
 | 10 | API compatibility | All new tools and contract fields are additive. Existing tool names, response envelopes, status enums, and bounded `wait_for_run` semantics are preserved. | Reviewer specifies request/response-compatible APIs. Breaking existing clients is rejected. | Renaming or repurposing `wait_for_run`; changing status enums; replacing the existing run schema. |
 | 11 | Notification trigger surface | Emit notifications on terminal status transitions (`completed`, `failed`, `cancelled`, `timed_out`, `orphaned`) and on the first appended fatal `latest_error`. Reserve schema room for future progress milestones, but do not emit progress notifications in this slice. | Matches the comment's "terminal or error state" requirement and avoids notification spam. | Emitting on every event; emitting only on success; coupling to backend-specific events. |
@@ -282,7 +304,7 @@ Sources read:
 | CCS-6 | OpenCode supervisor prompt update (notification-aware, no deprecation) | CCS-3 | pending | `src/opencode/config.ts` prompt teaches `wait_for_any_run` (default-wake on terminal+fatal_error) and `list_run_notifications` for multi-run reconciliation while preserving LRT-7 adaptive cadence guidance as a fallback. Existing OpenCode harness regression tests pass; new assertions cover the new guidance. **No deprecation note is added to the prompt.** **Do not** add background-monitor process spawning to the OpenCode harness. |
 | CCS-7a | Claude Code surface discovery and validation | CCS-1 | pending | New script + module (`src/claude/discovery.ts` and `scripts/probe-claude.mjs` or equivalent test) probe the installed `claude` binary and produce a structured compatibility report covering: (a) `--mcp-config <file>` accepted; (b) `--strict-mcp-config` (or the validated equivalent) accepted; (c) project-scoped MCP wiring without `.mcp.json` mutation; (d) supervisor system-prompt / config injection mechanism (CLI flag, env var, or file); (e) permission / tool allowlist behavior via `--allowed-tools` / `--disallowed-tools` and/or settings-file driven allowlists; (f) `Bash` tool with `run_in_background: true` is reliably surfaced. The report explicitly records `--dangerously-skip-permissions` as a **forbidden** surface that the harness must never emit. Report includes detected `claude --version`, presence/absence of each surface, and the recommended harness path. **Acceptance**: a fixture-backed test asserts the report shape and a documented compatibility matrix. **Escalation rule**: if the only stable path requires persistent `.claude/` or `.mcp.json` mutation, CCS-8/9 are paused and the user is asked for explicit approval before continuing. |
 | CCS-7 | Claude Code capability catalog | CCS-7a | pending | `src/claude/capabilities.ts` exposes a Claude-Code-supervisor-side catalog (analogous to `src/opencode/capabilities.ts`) that re-uses backend status and worker profile validation; no duplication of OpenCode logic — extract a shared core if needed. Consumes the discovery report from CCS-7a to gate availability. |
-| CCS-8 | Claude Code supervisor config builder (prompt + curated allowlist sources) | CCS-7 | pending | `src/claude/config.ts` builds an in-memory MCP config (only the agent-orchestrator MCP server) + supervisor system prompt + the inputs that CCS-15 (`permission.ts`) and CCS-16 (`skills.ts`) consume to assemble the final ephemeral `settings.json` and skill root, using only surfaces validated by CCS-7a. Prompt teaches: profile-mode `start_run`, launching `agent-orchestrator monitor <run_id>` via `Bash run_in_background: true` against the pinned monitor binary path (Decision 23), reacting on both `terminal` and `fatal_error` wake semantics, reconciling via `wait_for_any_run` / `list_run_notifications`, bounded-wait fallback that mirrors LRT-7 cadence, cancellation discipline. References only orchestrate-* skills by name. No experimental sub-agent / agent-team dependency. |
+| CCS-8 | Claude Code supervisor config builder (prompt + curated allowlist sources) | CCS-7 | pending | `src/claude/config.ts` builds an in-memory MCP config (only the agent-orchestrator MCP server) + supervisor system prompt + the inputs that CCS-15 (`permission.ts`) and CCS-16 (`skills.ts`) consume to assemble the final ephemeral `settings.json` and skill root, using only surfaces validated by CCS-7a. Prompt teaches: profile-mode `start_run`, launching `agent-orchestrator monitor <run_id>` via `Bash run_in_background: true` against the pinned monitor binary path (Decision 23), reacting on both `terminal` and `fatal_error` wake semantics, relaunching the pinned monitor with `--since <notification_id>` when a live handle is missing, `list_run_notifications` reconciliation, and cancellation discipline. References only orchestrate-* skills by name. No experimental sub-agent / agent-team dependency. |
 | CCS-9 | Claude Code launcher | CCS-8, CCS-15, CCS-16, CCS-17, CCS-18 | pending | `src/claude/launcher.ts` parses args (mirrors OpenCode launcher options surface where appropriate), resolves the `claude` binary, builds an ephemeral envelope under the daemon state dir containing `settings.json` (from CCS-15), `.mcp.json`-equivalent MCP config (only agent-orchestrator), curated skill root (from CCS-16), and any other surfaces required by the CCS-7a report. Spawns `claude` with: the discovery-validated MCP-config flag, **always-on `--strict-mcp-config`**, redirected `HOME`/`XDG_CONFIG_HOME`/`CLAUDE_CONFIG_DIR` env, the supervisor prompt + agent identity, and the curated permission/tool allowlist. Never passes `--dangerously-skip-permissions`. Applies passthrough hardening from CCS-17 to user-supplied flags. Cleans up the ephemeral dir on exit (including on signal). Fails fast with an actionable error if the binary's surfaces no longer match the recorded discovery report. |
 | CCS-10 | CLI/bin wiring | CCS-9, CCS-5 | pending | `src/cli.ts` adds `claude` and `monitor` subcommands. `src/claudeCli.ts` mirrors `src/opencodeCli.ts`. `package.json` adds `agent-orchestrator-claude` to `bin`. Help text updated. Backward compatibility preserved: existing `agent-orchestrator`, `-daemon`, `-opencode` bins behave identically. |
 | CCS-11 | Pruning extension | CCS-1, CCS-2 | pending | `prune_runs` extended (additively) to prune notifications for runs that are pruned, with a dry-run report. Dry-run still reports counts without mutation. |
@@ -400,7 +422,7 @@ Sources read:
 
 ### CCS-8: Claude Code supervisor config builder
 - **Status:** completed (2026-05-03)
-- **Evidence:** `src/claude/config.ts` builds `{ systemPrompt, settings, mcpConfig, monitorPin }`. The system prompt teaches profile-mode `start_run`, `Bash run_in_background: true` against the pinned monitor binary, terminal+fatal_error wake semantics, `wait_for_any_run` / `list_run_notifications` reconciliation, bounded fallback matching LRT-7 cadence, references only orchestrate-* skill names. The MCP config exposes only the agent-orchestrator MCP server (Decision 7, Decision 20). Tests: `claudeHarness.test.ts`.
+- **Evidence:** `src/claude/config.ts` builds `{ systemPrompt, settings, mcpConfig, monitorPin }`. The system prompt teaches profile-mode `start_run`, `Bash run_in_background: true` against the pinned monitor binary, terminal+fatal_error wake semantics, relaunching the pinned monitor with `--since <notification_id>` when a live handle is missing, `list_run_notifications` reconciliation, and references only orchestrate-* skill names. The MCP config exposes only the agent-orchestrator MCP server (Decision 7, Decision 20). Tests: `claudeHarness.test.ts`.
 
 ### CCS-9: Claude Code launcher
 - **Status:** completed (2026-05-03)
@@ -770,3 +792,143 @@ contradicted the post-#2/#3 implementation. No source/test/docs other than
 - `grep -n "--bare" README.md` shows the forbidden-flag entry with rationale; the README no longer contains text suggesting `--bare` is acceptable.
 
 No source, test, or other docs were modified in this follow-up.
+
+## Reviewer Follow-up #5 (2026-05-03)
+
+The polling-only Claude supervisor from follow-ups #2-#4 conflicted with the
+issue #13 product requirement: Claude Code should create a real background
+monitor job per run so the runtime can wake when that job exits. This follow-up
+restores that direction without re-introducing broad Bash access.
+
+- **Fix:** the Claude supervisor built-in surface is now
+  `Read,Glob,Grep,Bash`. Bash is pre-approved only for
+  `Bash(<node> <agent-orchestrator> monitor *)` through generated settings and
+  `--allowed-tools`; `--permission-mode dontAsk` denies anything outside the
+  allowlist instead of prompting. `Edit`, `Write`, `WebFetch`, `WebSearch`,
+  `Task`, `NotebookEdit`, and `TodoWrite` remain denied/unavailable.
+- **Prompt:** after `start_run`, the supervisor is instructed to launch
+  `<agent-orchestrator command> monitor <run_id> --json-line` with
+  `Bash run_in_background: true`, parse the one JSON wake line, update the
+  notification cursor, then fetch status/result as needed. `wait_for_any_run`
+  remains the bounded fallback and `list_run_notifications` remains the
+  cross-turn reconciliation path.
+- **Discovery:** `--allowed-tools` and `--permission-mode` are required
+  surfaces again, alongside `--tools`, `--setting-sources`, strict MCP config,
+  settings injection, and append-system-prompt-file.
+- **Docs:** README and `docs/development/mcp-tooling.md` once again describe
+  `agent-orchestrator monitor <run_id>` as the Claude harness background
+  monitor bridge, not merely an out-of-envelope user-shell helper.
+
+### Superseded Evidence
+- Follow-up #2's `--tools "Read,Glob,Grep"` / no-`--allowed-tools` model is
+  superseded by `--tools "Read,Glob,Grep,Bash"` plus the pinned Bash monitor
+  allow pattern and `dontAsk`.
+- Follow-up #3's statement that `--allowed-tools` is optional is superseded:
+  it is required to pre-approve the monitor command.
+- Follow-up #4's README-only out-of-envelope monitor language is superseded:
+  the Claude supervisor invokes the monitor itself as a background Bash task.
+
+## Reviewer Follow-up #6 (2026-05-03)
+
+The supervisor prompt now makes the run-supervision mechanisms hierarchical
+instead of presenting them as interchangeable options:
+
+- MCP starts runs and fetches authoritative state.
+- The pinned Bash monitor is the normal current-turn wake path for runs started
+  by the Claude supervisor.
+- If the supervisor inherits active run IDs without live monitor handles, it
+  launches new pinned monitors, using `--since <notification_id>` when it has a
+  cursor.
+- `list_run_notifications` is cross-turn reconciliation.
+
+The prompt explicitly says to use exactly one active wait mechanism per run and
+not to call MCP blocking wait tools from the Claude supervisor.
+
+## Reviewer Follow-up #7 (2026-05-03)
+
+OpenCode and Claude now have intentionally different, explicit run-supervision
+contracts:
+
+- OpenCode is MCP-only. Its prompt says not to use Bash,
+  `Bash run_in_background`, or the monitor CLI; `wait_for_any_run` is the
+  normal current-turn wake path, `wait_for_run` is compatibility fallback, and
+  `list_run_notifications` is cross-turn reconciliation.
+- Claude uses the pinned Bash monitor as the normal current-turn wake path,
+  relaunches that same pinned monitor when no monitor handle exists, and is not
+  allowlisted for MCP blocking wait tools.
+
+README and `docs/development/mcp-tooling.md` now document this client-specific
+matrix so future prompt changes do not collapse the two harness contracts.
+
+## Reviewer Follow-up #8 (2026-05-03)
+
+Live Claude smoke exposed that fallback language is not enough. Claude first
+launched the pinned Bash monitor and then called synchronous `wait_for_run`; a
+second smoke removed that path, but Claude still launched the monitor and then
+called `wait_for_any_run` in parallel. The corrected contract is therefore:
+Claude has exactly one blocking wait mechanism, the pinned Bash monitor.
+
+- **Fix:** Claude's MCP tool allowlist excludes both MCP blocking wait tools:
+  `mcp__agent-orchestrator__wait_for_any_run` and
+  `mcp__agent-orchestrator__wait_for_run`. Generated Claude settings deny both
+  tools explicitly, and spawn-time `--allowed-tools` omits both.
+- **Prompt:** the Claude supervisor prompt no longer describes MCP waits as a
+  fallback. After `start_run` or `send_followup`, Claude launches the pinned
+  monitor with `Bash run_in_background: true`; if it later inherits active
+  run IDs without live monitor handles, it launches a new pinned monitor,
+  using `--since <notification_id>` when it has a cursor.
+- **Coexistence:** both MCP blocking wait tools remain registered in the MCP
+  server and remain available to OpenCode/generic clients. OpenCode stays
+  MCP-only: `wait_for_any_run` is its normal current-turn wake path and
+  `wait_for_run` is its bounded single-run compatibility fallback.
+
+## Reviewer Follow-up #9 (2026-05-03)
+
+Live Claude smoke showed that progress/status inspection still had an
+uncontrolled escape hatch: after `get_run_events` returned a large MCP payload,
+Claude shell-parsed the client-side saved tool-result file with `jq`/`head`.
+That violated the intended supervisor model even though it was not a worker
+wait.
+
+- **MCP contract:** added `get_run_progress`, a compact, bounded progress tool
+  that returns recent event summaries and extracted text snippets with
+  `limit`, `after_sequence`, and `max_text_chars` controls. It is the preferred
+  user-facing progress/status path; `get_run_events` remains for raw event
+  debugging only.
+- **Claude prompt and permissions:** Claude now explicitly uses
+  `get_run_progress` for progress/status questions, must not inspect
+  `.claude/projects` or `tool-results`, and must not use shell tools such as
+  `jq`, `cat`, `head`, `tail`, `grep`, `rg`, `sed`, or `awk` for MCP output
+  inspection. Generated settings deny those common shell-inspection patterns
+  while still allowing only the pinned monitor command.
+- **OpenCode parity:** the OpenCode supervisor prompt also names
+  `get_run_progress` as the normal progress/status inspection tool while
+  preserving its MCP-only wait path.
+- **Docs/tests:** README and MCP tooling docs document the split; tests cover
+  the new MCP schema, compact progress output, Claude deny rules/prompt text,
+  and OpenCode prompt text.
+
+## Reviewer Follow-up #10 (2026-05-03)
+
+Live Claude usage showed the per-launch random temp envelope was too isolated:
+Claude prompted to trust a different random project directory on every launch,
+and supervisor session history/resume was fragmented by the changing cwd.
+
+- **Fix:** the Claude launcher now uses a stable isolated envelope per target
+  workspace under
+  `${AGENT_ORCHESTRATOR_HOME:-$HOME/.agent-orchestrator}/claude-supervisor/envelopes/<workspace>-<hash>`.
+  The hash is derived from the real target workspace path, so the same `--cwd`
+  gets the same Claude project path across launches.
+- **Isolation preserved:** the stable envelope is still not the target
+  workspace and `--add-dir` is still not passed. Before each launch the
+  launcher removes cwd-rooted Claude discovery surfaces from the envelope
+  (`.claude/`, `.mcp.json`, `CLAUDE.md`, `CLAUDE.local.md`) and regenerates
+  only the curated orchestrate-* skill root plus the harness-owned
+  `settings.json`, `mcp.json`, and system prompt.
+- **State split:** Claude account/auth state remains in the durable supervisor
+  `HOME/.claude`, while the stable envelope supplies only the project cwd used
+  for trust prompts, project-scoped discovery, and supervisor session history.
+- **Tests/docs:** the Claude harness test now asserts same-workspace launches
+  reuse the same envelope path, stale poisoned discovery files are cleared on
+  relaunch, and cleanup no longer removes the stable cwd. README and MCP
+  tooling docs describe the stable-envelope behavior.

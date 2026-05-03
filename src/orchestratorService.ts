@@ -6,6 +6,7 @@ import {
   CancelRunInputSchema,
   GetObservabilitySnapshotInputSchema,
   GetRunEventsInputSchema,
+  GetRunProgressInputSchema,
   isTerminalStatus,
   ListRunNotificationsInputSchema,
   ListWorkerProfilesInputSchema,
@@ -34,6 +35,7 @@ import {
   type RunError,
   type ServiceTier,
   type ToolResponse,
+  type WorkerEvent,
   type WorkerResult,
 } from './contract.js';
 import type { WorkerBackend } from './backend/WorkerBackend.js';
@@ -124,6 +126,8 @@ export class OrchestratorService {
         return this.getRunStatus(params);
       case 'get_run_events':
         return this.getRunEvents(params);
+      case 'get_run_progress':
+        return this.getRunProgress(params);
       case 'wait_for_run':
         return this.waitForRun(params);
       case 'wait_for_any_run':
@@ -394,6 +398,42 @@ export class OrchestratorService {
     const run = await this.store.loadRun(parsed.data.run_id);
     if (!run) return unknownRun(parsed.data.run_id);
     return wrapOk(await this.store.readEvents(parsed.data.run_id, parsed.data.after_sequence, parsed.data.limit));
+  }
+
+  async getRunProgress(params: unknown): Promise<ToolResult> {
+    const parsed = GetRunProgressInputSchema.safeParse(params);
+    if (!parsed.success) return invalidInput(parsed.error.message);
+    const { run_id, after_sequence, limit, max_text_chars } = parsed.data;
+    let runSummary;
+    try {
+      runSummary = await this.store.loadMeta(run_id);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return unknownRun(run_id);
+      throw error;
+    }
+
+    const summary = await this.store.readEventSummary(run_id, after_sequence === undefined ? limit : 0);
+    const page = after_sequence === undefined
+      ? {
+        events: summary.recent_events,
+        next_sequence: summary.recent_events.at(-1)?.seq ?? 0,
+        has_more: summary.event_count > summary.recent_events.length,
+      }
+      : await this.store.readEvents(run_id, after_sequence, limit);
+    const recentEvents = page.events.map((event) => summarizeProgressEvent(event, max_text_chars));
+
+    return wrapOk({
+      run_summary: runSummary,
+      progress: {
+        event_count: summary.event_count,
+        next_sequence: page.next_sequence,
+        has_more: page.has_more,
+        latest_event_sequence: summary.last_event?.seq ?? null,
+        latest_event_at: summary.last_event?.ts ?? null,
+        latest_text: latestProgressText(page.events, max_text_chars),
+        recent_events: recentEvents,
+      },
+    });
   }
 
   async waitForRun(params: unknown): Promise<ToolResult> {
@@ -699,6 +739,153 @@ function invalidInput(message: string): ToolResult {
 
 function unknownRun(runId: string): ToolResult {
   return wrapErr(orchestratorError('UNKNOWN_RUN', `Unknown run: ${runId}`));
+}
+
+function summarizeProgressEvent(event: WorkerEvent, maxTextChars: number): {
+  seq: number;
+  ts: string;
+  type: WorkerEvent['type'];
+  summary: string | null;
+  text: string | null;
+} {
+  return {
+    seq: event.seq,
+    ts: event.ts,
+    type: event.type,
+    summary: progressEventSummary(event),
+    text: progressEventText(event, maxTextChars),
+  };
+}
+
+function latestProgressText(events: WorkerEvent[], maxTextChars: number): string | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const text = progressEventText(events[index]!, maxTextChars);
+    if (text) return text;
+  }
+  return null;
+}
+
+function progressEventText(event: WorkerEvent, maxTextChars: number): string | null {
+  if (event.type !== 'assistant_message' && event.type !== 'tool_result' && event.type !== 'error') {
+    return null;
+  }
+  const text = textFromValue(event.payload);
+  return text ? compactText(text, maxTextChars) : null;
+}
+
+function progressEventSummary(event: WorkerEvent): string | null {
+  if (event.type === 'assistant_message') {
+    return compactText(textFromValue(event.payload) ?? '', 240) || null;
+  }
+  if (event.type === 'tool_use') {
+    const name = toolName(event.payload);
+    const command = stringFromRecord(event.payload, 'command')
+      ?? commandFromInput(event.payload.input)
+      ?? commandFromInput(event.payload.arguments)
+      ?? commandFromInput(event.payload.args);
+    if (command) return `${name}: ${compactText(command, 180)}`;
+    const path = pathFromInput(event.payload.input)
+      ?? pathFromInput(event.payload.arguments)
+      ?? pathFromInput(event.payload.args)
+      ?? stringFromRecord(event.payload, 'path');
+    return path ? `${name}: ${compactText(path, 180)}` : name;
+  }
+  if (event.type === 'tool_result') {
+    const status = stringFromRecord(event.payload, 'status')
+      ?? stringFromRecord(event.payload, 'state')
+      ?? stringFromRecord(event.payload, 'subtype');
+    const text = compactText(textFromValue(event.payload) ?? '', 220);
+    if (status && text) return `tool_result ${status}: ${text}`;
+    return text || (status ? `tool_result ${status}` : 'tool_result');
+  }
+  if (event.type === 'error') {
+    return compactText(textFromValue(event.payload) ?? jsonPreview(event.payload), 240);
+  }
+  if (event.type === 'lifecycle') {
+    const status = stringFromRecord(event.payload, 'status')
+      ?? stringFromRecord(event.payload, 'state')
+      ?? stringFromRecord(event.payload, 'subtype');
+    return status ? `lifecycle: ${status}` : 'lifecycle';
+  }
+  return null;
+}
+
+function toolName(payload: Record<string, unknown>): string {
+  return stringFromRecord(payload, 'name')
+    ?? stringFromRecord(payload, 'tool_name')
+    ?? stringFromRecord(payload, 'toolName')
+    ?? stringFromRecord(payload, 'type')
+    ?? 'tool';
+}
+
+function commandFromInput(input: unknown): string | null {
+  const rec = record(input);
+  if (!rec) return typeof input === 'string' && input.trim() ? input.trim() : null;
+  return stringFromRecord(rec, 'command')
+    ?? stringFromRecord(rec, 'cmd')
+    ?? stringFromRecord(rec, 'script');
+}
+
+function pathFromInput(input: unknown): string | null {
+  const rec = record(input);
+  if (!rec) return null;
+  return stringFromRecord(rec, 'file_path')
+    ?? stringFromRecord(rec, 'filepath')
+    ?? stringFromRecord(rec, 'path')
+    ?? stringFromRecord(rec, 'filename');
+}
+
+function textFromValue(value: unknown, depth = 0): string | null {
+  if (depth > 4) return null;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed || null;
+  }
+  if (Array.isArray(value)) {
+    return joinText(value.map((item) => textFromValue(item, depth + 1)));
+  }
+  const rec = record(value);
+  if (!rec) return null;
+  for (const key of ['text', 'message', 'result', 'output', 'summary', 'content']) {
+    if (key === 'message' && typeof rec[key] === 'object') {
+      const nested = textFromValue(rec[key], depth + 1);
+      if (nested) return nested;
+      continue;
+    }
+    const text = textFromValue(rec[key], depth + 1);
+    if (text) return text;
+  }
+  const error = rec.error;
+  if (typeof error === 'string') return error.trim() || null;
+  const nestedError = record(error);
+  return nestedError ? stringFromRecord(nestedError, 'message') : null;
+}
+
+function joinText(values: Array<string | null>): string | null {
+  const joined = values.filter((item): item is string => Boolean(item)).join('\n').trim();
+  return joined || null;
+}
+
+function stringFromRecord(value: Record<string, unknown>, key: string): string | null {
+  const raw = value[key];
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function jsonPreview(value: unknown): string {
+  try {
+    return JSON.stringify(value, (key, child) => key === 'raw' ? '[raw omitted]' : child);
+  } catch {
+    return String(value);
+  }
+}
+
+function compactText(value: string, maxLength: number): string {
+  const compact = value.replace(/\s+/g, ' ').trim();
+  return compact.length > maxLength ? `${compact.slice(0, maxLength - 3)}...` : compact;
 }
 
 function backendNameFor(backend: WorkerBackend): Backend {

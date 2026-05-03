@@ -98,7 +98,16 @@ describe('OpenCode orchestration harness', () => {
     assert.match(agent.prompt, /Writable profiles manifest path: \/repo\/\.agents\/orchestration\/profiles\.json/);
     assert.match(agent.prompt, /start_run with profile plus profiles_file/);
     assert.match(agent.prompt, /must reference profile aliases, not raw model names/);
+    assert.match(agent.prompt, /Run supervision decision rules for OpenCode/);
+    assert.match(agent.prompt, /OpenCode does not use Bash, Bash run_in_background, or the monitor CLI/);
+    assert.match(agent.prompt, /MCP tools are the only supervision path/);
+    assert.match(agent.prompt, /mcp__agent-orchestrator__get_run_progress first/);
+    assert.match(agent.prompt, /For current-turn waiting, use mcp__agent-orchestrator__wait_for_any_run/);
+    assert.match(agent.prompt, /For cross-turn reconciliation, use mcp__agent-orchestrator__list_run_notifications/);
+    assert.match(agent.prompt, /wait_for_run only as a compatibility fallback/);
+    assert.doesNotMatch(agent.prompt, /monitor <run_id> --json-line/);
     assert.match(agent.prompt, /first check-in around 30 seconds/);
+    assert.match(agent.prompt, /Use get_run_events only when raw events are explicitly needed/);
     assert.match(agent.prompt, /latest_error is fatal/);
     assert.match(agent.prompt, /10-15 minute ceiling/);
     assert.match(agent.prompt, /idle_timeout_seconds/);
