@@ -25,10 +25,29 @@ describe('cursor SDK event mapping', () => {
       },
     });
     const types = parsed.events.map((event) => event.type);
-    assert.ok(types.includes('assistant_message'));
+    assert.equal(types.filter((type) => type === 'assistant_message').length, 1);
+    const assistantEvent = parsed.events.find((event) => event.type === 'assistant_message');
+    assert.ok(assistantEvent);
+    const payload = assistantEvent.payload as { text?: unknown; raw?: unknown };
+    assert.equal(payload.text, 'hello');
+    assert.ok(payload.raw && typeof payload.raw === 'object');
     assert.ok(types.filter((type) => type === 'tool_use').length === 2);
     assert.deepStrictEqual(parsed.filesChanged, ['src/foo.ts']);
     assert.deepStrictEqual(parsed.commandsRun, ['pnpm test']);
+  });
+
+  it('emits a single assistant_message with the raw record when no text is present', () => {
+    const parsed = parseCursorEvent({
+      type: 'assistant',
+      agent_id: 'bc-123',
+      run_id: 'run-1',
+      message: { role: 'assistant', content: [] },
+    });
+    const assistantEvents = parsed.events.filter((event) => event.type === 'assistant_message');
+    assert.equal(assistantEvents.length, 1);
+    const payload = assistantEvents[0]?.payload as Record<string, unknown>;
+    assert.equal(payload.type, 'assistant');
+    assert.equal(payload.agent_id, 'bc-123');
   });
 
   it('extracts file paths from tool_call args for write/edit-shaped tools', () => {

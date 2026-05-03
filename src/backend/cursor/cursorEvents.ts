@@ -70,13 +70,13 @@ function handleStatus(rec: Record<string, unknown>, parsed: ParsedBackendEvent):
 }
 
 function handleAssistant(rec: Record<string, unknown>, parsed: ParsedBackendEvent): void {
-  parsed.events.push({ type: 'assistant_message', payload: rec });
   const message = getRecord(rec.message);
   const content = message?.content;
   const text = extractText(message?.content) ?? extractText(rec.content) ?? getString(rec.text);
-  if (text) {
-    parsed.events.push({ type: 'assistant_message', payload: { text, raw: rec } });
-  }
+  parsed.events.push({
+    type: 'assistant_message',
+    payload: text ? { text, raw: rec } : rec,
+  });
   if (Array.isArray(content)) {
     for (const item of content) {
       const block = getRecord(item);

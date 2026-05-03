@@ -7,6 +7,7 @@ import { CursorSdkRuntime } from '../backend/cursor/runtime.js';
 import { createBackendRegistry } from '../backend/registry.js';
 import { OrchestratorService } from '../orchestratorService.js';
 import { RunStore } from '../runStore.js';
+import { defaultCursorSdkAdapter } from '../backend/cursor/sdk.js';
 import type {
   CursorAgent,
   CursorAgentApi,
@@ -75,6 +76,17 @@ function fakeAdapter(api: CursorAgentApi, modulePath = '/tmp/fake/sdk'): CursorS
   };
 }
 
+async function waitForActiveHandle(service: OrchestratorService, runId: string, timeoutMs = 2_000): Promise<void> {
+  const activeRuns = (service as unknown as { activeRuns: Map<string, unknown> }).activeRuns;
+  const start = Date.now();
+  while (!activeRuns.has(runId)) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`active run handle for ${runId} did not appear within ${timeoutMs}ms`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 function unavailableAdapter(reason = 'Cannot find module @cursor/sdk'): CursorSdkAdapter {
   return {
     async available() {
@@ -95,6 +107,28 @@ async function createServiceWith(adapter: CursorSdkAdapter, env: NodeJS.ProcessE
   await service.initialize();
   return { service, store, home };
 }
+
+describe('defaultCursorSdkAdapter contract', () => {
+  it('returns ok: false from available() when @cursor/sdk lacks the expected Agent factory', async () => {
+    const adapter = defaultCursorSdkAdapter({
+      importer: async () => ({ NotAgent: {} }),
+      resolveModulePath: () => null,
+    });
+    const result = await adapter.available();
+    assert.equal(result.ok, false);
+    assert.match((result as { ok: false; reason: string }).reason, /Agent factory/i);
+  });
+
+  it('rejects loadAgentApi() when @cursor/sdk lacks the expected Agent factory but caches the failure', async () => {
+    const adapter = defaultCursorSdkAdapter({
+      importer: async () => ({ NotAgent: {} }),
+      resolveModulePath: () => null,
+    });
+    await assert.rejects(adapter.loadAgentApi(), /Agent factory/i);
+    const cached = await adapter.available();
+    assert.equal(cached.ok, false);
+  });
+});
 
 describe('CursorSdkRuntime missing-SDK behavior', () => {
   it('produces a durable failed run with WORKER_BINARY_MISSING when @cursor/sdk is not installed', async () => {
@@ -223,12 +257,53 @@ describe('CursorSdkRuntime success and cancellation paths', () => {
     const start = await service.startRun({ backend: 'cursor', prompt: 'go', cwd, model: 'composer-2' });
     const runId = (start as { ok: true; run_id: string }).run_id;
     // Allow the start path to register the active run.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitForActiveHandle(service, runId);
     await service.cancelRun({ run_id: runId });
     const waited = await service.waitForRun({ run_id: runId, wait_seconds: 5 });
     assert.equal(waited.ok, true);
     assert.equal((waited as { ok: true; status: string }).status, 'cancelled');
     assert.ok(cancelCalled);
+  });
+
+  it('bounds drain when a late cancel arrives against an SDK that ignores run.cancel()', async () => {
+    // Fake run whose stream() and wait() never resolve and whose cancel() is a no-op.
+    // This is the worst-case shape D12 must protect against: the SDK ignores cancel()
+    // and the orchestrator must still enforce cancelDrainMs.
+    const run: CursorRun = {
+      id: 'run-1',
+      agentId: 'bc-late-cancel',
+      get status() { return 'running' as CursorRunStatus; },
+      result: undefined,
+      async *stream() {
+        yield { type: 'system', agent_id: 'bc-late-cancel', run_id: 'run-1' } as CursorSdkMessage;
+        await new Promise(() => {});
+      },
+      async wait() {
+        await new Promise(() => {});
+        return { status: 'running' as CursorRunStatus };
+      },
+      async cancel() {
+        // intentional no-op: simulate an SDK that ignores cancel.
+      },
+    } as CursorRun;
+    const agent = fakeAgent('bc-late-cancel', run);
+    const api: CursorAgentApi = {
+      async create() { return agent; },
+      async resume() { return agent; },
+    };
+    const { service } = await createServiceWith(fakeAdapter(api));
+    const cwd = await mkdtemp(join(tmpdir(), 'cursor-late-cancel-'));
+    const start = await service.startRun({ backend: 'cursor', prompt: 'go', cwd, model: 'composer-2' });
+    const runId = (start as { ok: true; run_id: string }).run_id;
+    await waitForActiveHandle(service, runId);
+    const startedAt = Date.now();
+    await service.cancelRun({ run_id: runId });
+    const waited = await service.waitForRun({ run_id: runId, wait_seconds: 5 });
+    const elapsed = Date.now() - startedAt;
+    assert.equal(waited.ok, true);
+    assert.equal((waited as { ok: true; status: string }).status, 'cancelled');
+    // cancelDrainMs is 25ms in tests; allow generous slack for CI scheduling.
+    assert.ok(elapsed < 2_000, `expected finalization within bound, took ${elapsed}ms`);
   });
 });
 
@@ -418,6 +493,18 @@ describe('CursorSdkRuntime SDK error normalization', () => {
     assert.equal(summary.latest_error?.category, 'invalid_model');
   });
 
+  it('maps ConfigurationError with bad-API-key message to auth category', async () => {
+    const error = Object.assign(new Error('Bad API key supplied'), { name: 'ConfigurationError', status: 400 });
+    const { summary } = await runFailedStart(adapterThatThrowsOnCreate(error));
+    assert.equal(summary.latest_error?.category, 'auth');
+  });
+
+  it('maps ConfigurationError with invalid-request-parameter message to protocol category', async () => {
+    const error = Object.assign(new Error('Invalid request parameter: foo'), { name: 'ConfigurationError', status: 400 });
+    const { summary } = await runFailedStart(adapterThatThrowsOnCreate(error));
+    assert.equal(summary.latest_error?.category, 'protocol');
+  });
+
   it('maps RateLimitError to rate_limit and marks retryable', async () => {
     const error = Object.assign(new Error('rate limit exceeded'), { name: 'RateLimitError', status: 429 });
     const { summary, result } = await runFailedStart(adapterThatThrowsOnCreate(error));
@@ -539,7 +626,7 @@ describe('CursorSdkRuntime finalize artifacts and timeout/cancel error synthesis
     const start = await service.startRun({ backend: 'cursor', prompt: 'p', cwd, model: 'composer-2' });
     const runId = (start as { ok: true; run_id: string }).run_id;
     // Wait until orchestrator registers the active run.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitForActiveHandle(service, runId);
     const handle = (service as unknown as { activeRuns: Map<string, { cancel(status: 'failed' | 'cancelled' | 'timed_out', terminal?: { reason?: string; timeout_reason?: string | null; context?: Record<string, unknown> }): void }> }).activeRuns.get(runId);
     assert.ok(handle, 'expected an active run handle');
     handle.cancel('timed_out', {
@@ -587,7 +674,7 @@ describe('CursorSdkRuntime finalize artifacts and timeout/cancel error synthesis
     const cwd = await mkdtemp(join(tmpdir(), 'cursor-usercancel-'));
     const start = await service.startRun({ backend: 'cursor', prompt: 'p', cwd, model: 'composer-2' });
     const runId = (start as { ok: true; run_id: string }).run_id;
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitForActiveHandle(service, runId);
     await service.cancelRun({ run_id: runId });
     await service.waitForRun({ run_id: runId, wait_seconds: 5 });
     const result = await service.getRunResult({ run_id: runId });

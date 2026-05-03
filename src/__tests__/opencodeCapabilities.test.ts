@@ -128,6 +128,27 @@ describe('OpenCode worker capability profiles', () => {
     assert.ok(!result.ok && result.errors.some((error) => error.includes('profile unknownEffort: Claude reasoning_effort must be one of low, medium, high, xhigh, or max')));
   });
 
+  it('accepts a minimal cursor profile', () => {
+    const manifest = parseWorkerProfileManifest({
+      profiles: {
+        cursorOk: {
+          backend: 'cursor',
+          model: 'composer-2',
+        },
+      },
+    });
+    assert.equal(manifest.ok, true);
+
+    const result = validateWorkerProfiles(
+      manifest.ok ? manifest.value : assert.fail('manifest parse failed'),
+      createWorkerCapabilityCatalog(),
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.ok && result.value.profiles.cursorOk?.backend, 'cursor');
+    assert.equal(result.ok && result.value.profiles.cursorOk?.model, 'composer-2');
+  });
+
   it('accepts cursor profiles that pass model only and rejects unsupported settings', () => {
     const manifest = parseWorkerProfileManifest({
       profiles: {

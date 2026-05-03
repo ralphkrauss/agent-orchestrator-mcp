@@ -55,6 +55,10 @@ export function normalizeCursorSdkError(error: unknown): NormalizedCursorError {
     const lower = message.toLowerCase();
     if (/(agent .* (not found|expired|stale|missing|unknown)|unknown agent|invalid agent)/.test(lower)) {
       category = 'protocol';
+    } else if (/(api[ _]?key|unauthor[iz]ed|authentication)/.test(lower)) {
+      category = 'auth';
+    } else if (/(invalid request|invalid parameter|missing parameter|bad request)/.test(lower)) {
+      category = 'protocol';
     }
   }
 

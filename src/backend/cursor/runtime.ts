@@ -182,6 +182,8 @@ interface CursorRunState {
   resultEvent: BackendResultEvent | null;
   cancelStatus?: CancelStatus;
   cancelTerminal?: RunTerminalOverride;
+  cancelRequested: Promise<void>;
+  resolveCancelRequested: () => void;
   lastActivityMs: number;
   completion: Promise<RunMeta>;
 }
@@ -193,6 +195,11 @@ function createCursorHandle(
   cancelDrainMs: number,
   store: RunStore,
 ): RuntimeRunHandle {
+  let resolveCancelRequested!: () => void;
+  const cancelRequested = new Promise<void>((resolve) => {
+    resolveCancelRequested = resolve;
+  });
+
   const state: CursorRunState = {
     agent,
     run,
@@ -203,6 +210,8 @@ function createCursorHandle(
     commandsRun: [],
     observedErrors: [],
     resultEvent: null,
+    cancelRequested,
+    resolveCancelRequested,
     lastActivityMs: Date.now(),
     completion: undefined as unknown as Promise<RunMeta>,
   };
@@ -216,6 +225,7 @@ function createCursorHandle(
       if (state.cancelStatus) return;
       state.cancelStatus = status;
       state.cancelTerminal = terminal;
+      state.resolveCancelRequested();
       void state.run.cancel().catch(() => undefined);
     },
     lastActivityMs() {
@@ -255,21 +265,23 @@ async function drainAndFinalize(runId: string, state: CursorRunState): Promise<R
 
   let runResult: CursorRunResult | null = null;
   try {
+    await Promise.race([drainPromise, state.cancelRequested]);
     if (state.cancelStatus) {
       await Promise.race([
         drainPromise,
         new Promise<void>((resolve) => setTimeout(resolve, state.cancelDrainMs)),
       ]);
-    } else {
-      await drainPromise;
     }
-    if (!state.cancelStatus) {
-      runResult = await state.run.wait();
-    } else {
+
+    const waitPromise = state.run.wait();
+    await Promise.race([waitPromise, state.cancelRequested]);
+    if (state.cancelStatus) {
       runResult = await Promise.race([
-        state.run.wait(),
+        waitPromise,
         new Promise<CursorRunResult>((resolve) => setTimeout(() => resolve({ status: state.run.status }), state.cancelDrainMs)),
       ]);
+    } else {
+      runResult = await waitPromise;
     }
   } catch (error) {
     state.observedErrors.push(cursorRunError(error));
