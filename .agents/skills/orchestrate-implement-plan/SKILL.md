@@ -86,16 +86,29 @@ runs and does not directly edit source, commit, or push.
    cannot be implemented as written, a required product/scope decision blocks
    progress, a dependency or external-service action needs approval, or workers
    disagree on a material issue they cannot resolve from the plan and repo.
-7. **Commit and push through the implementer after alignment.** Once implementer
+7. **Collect remaining human decisions before commit.** Before asking for the
+   final commit/push, explicitly list every unresolved human decision at the end
+   of the status update, even when the workers consider the implementation
+   otherwise ready. Include dependency/version choices, audit or verification
+   policy decisions, external-service approvals, release-readiness exceptions,
+   and any deferred scope/product choices. Ask the human to answer these in one
+   pass so the implementation can be finished cleanly. Do not bury these items
+   under residual risks or treat a failing release-quality gate as merely
+   informational.
+8. **Commit and push through the implementer after alignment and decisions.** Once implementer
    and reviewer are aligned and both approve the current implementation, ask the
-   implementer to commit and push the implementation. The supervisor must not
-   commit or push directly. The implementer should include only intended
-   implementation files and plan evidence files, exclude unrelated/user-owned
-   changes, and report the commit SHA, pushed branch, files committed, and any
-   files intentionally left uncommitted.
-8. **Finish with a handoff.** Tell the human the pushed branch/commit, concise
+   implementer to commit and push the implementation only after required human
+   decisions have been answered or explicitly deferred by the human. The
+   supervisor must not commit or push directly. The implementer should include
+   only intended implementation files and plan evidence files, exclude
+   unrelated/user-owned changes, and report the commit SHA, pushed branch, files
+   committed, and any files intentionally left uncommitted.
+9. **Finish with a handoff.** Tell the human the pushed branch/commit, concise
    implementation summary, reviewer outcome, verification evidence, residual
-   risks or deferred work, and whether any local uncommitted files remain.
+   risks or deferred work, whether any local uncommitted files remain, and a
+   final **Open Human Decisions** section. If there are no remaining decisions,
+   say "Open Human Decisions: none." If decisions remain, list each one with the
+   available options and the consequence of leaving it open.
 
 ## Follow-Up Prompts
 
@@ -115,11 +128,16 @@ runs and does not directly edit source, commit, or push.
   this existing review session. Focus on the prior findings, any new diff, and
   whether the implementation now satisfies the approved plan. Say explicitly
   whether it is ready."
+- Human decision summary: "The implementation is otherwise ready. Before commit
+  and push, here are the remaining human decisions needed to finish cleanly:
+  [numbered list with options and consequences]. Please answer each item or
+  explicitly defer it."
 - Final commit request to implementer: "The reviewer says the implementation is
-  ready and you agree the plan feedback is addressed. Commit and push only the
-  intended implementation and plan evidence files. Exclude unrelated or
-  user-owned changes. Report commit SHA, pushed branch, files committed, and any
-  files left uncommitted."
+  ready, the human has answered or explicitly deferred remaining human decisions,
+  and you agree the plan feedback is addressed. Commit and push only the intended
+  implementation and plan evidence files. Exclude unrelated or user-owned
+  changes. Report commit SHA, pushed branch, files committed, and any files left
+  uncommitted."
 
 ## Human Escalation Criteria
 
@@ -128,3 +146,9 @@ repository context cannot resolve, such as a required product/scope decision,
 permission or dependency approval, external-service write, persistent failing
 quality gate that changes acceptance, or an irreconcilable material disagreement
 between implementer and reviewer.
+
+When a release-quality gate fails because of a dependency, audit, packaging, or
+policy issue, treat it as an open human decision unless the approved plan already
+authorizes the exact remediation. Surface it in the final **Open Human
+Decisions** list before commit/push instead of leaving it only as a residual
+risk.
