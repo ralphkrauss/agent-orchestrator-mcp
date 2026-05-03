@@ -29,7 +29,7 @@ export const WorkerResultStatusSchema = z.enum([
 ]);
 export type WorkerResultStatus = z.infer<typeof WorkerResultStatusSchema>;
 
-export const BackendSchema = z.enum(['codex', 'claude']);
+export const BackendSchema = z.enum(['codex', 'claude', 'cursor']);
 export type Backend = z.infer<typeof BackendSchema>;
 
 export const RunActivitySourceSchema = z.enum([

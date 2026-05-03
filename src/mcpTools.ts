@@ -7,8 +7,8 @@ export const tools = [
       properties: {
         backend: {
           type: 'string',
-          enum: ['codex', 'claude'],
-          description: 'Direct mode backend. Omit when using profile.',
+          enum: ['codex', 'claude', 'cursor'],
+          description: 'Direct mode backend. Omit when using profile. The cursor backend uses the @cursor/sdk in-process and runs locally only.',
         },
         profile: {
           type: 'string',
@@ -22,17 +22,17 @@ export const tools = [
         cwd: { type: 'string' },
         model: {
           type: 'string',
-          description: 'Worker model id. For Claude, pass a direct model id such as claude-opus-4-7 or claude-opus-4-7[1m], not aliases like opus or sonnet.',
+          description: 'Worker model id. For Claude, pass a direct model id such as claude-opus-4-7 or claude-opus-4-7[1m], not aliases like opus or sonnet. For Cursor, pass a Cursor-side model id (e.g. composer-2).',
         },
         reasoning_effort: {
           type: 'string',
           enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
-          description: 'Backend-applied reasoning effort. Codex supports none/minimal/low/medium/high/xhigh. Claude supports low/medium/high/xhigh/max on supported direct model ids; xhigh requires Opus 4.7.',
+          description: 'Backend-applied reasoning effort. Codex supports none/minimal/low/medium/high/xhigh. Claude supports low/medium/high/xhigh/max on supported direct model ids; xhigh requires Opus 4.7. Cursor rejects reasoning_effort in this release.',
         },
         service_tier: {
           type: 'string',
           enum: ['fast', 'flex', 'normal'],
-          description: 'Backend-applied speed tier for Codex. Claude does not support this field.',
+          description: 'Backend-applied speed tier for Codex. Claude and Cursor do not support this field.',
         },
         metadata: { type: 'object', additionalProperties: true },
         idle_timeout_seconds: {
@@ -122,17 +122,17 @@ export const tools = [
         prompt: { type: 'string' },
         model: {
           type: 'string',
-          description: 'Worker model id. For Claude, pass a direct model id such as claude-opus-4-7 or claude-opus-4-7[1m], not aliases like opus or sonnet.',
+          description: 'Worker model id. For Claude, pass a direct model id such as claude-opus-4-7 or claude-opus-4-7[1m], not aliases like opus or sonnet. For Cursor, pass a Cursor-side model id (e.g. composer-2).',
         },
         reasoning_effort: {
           type: 'string',
           enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
-          description: 'Backend-applied reasoning effort. Omit to inherit the parent run setting. Claude xhigh requires Opus 4.7.',
+          description: 'Backend-applied reasoning effort. Omit to inherit the parent run setting. Claude xhigh requires Opus 4.7. Cursor rejects reasoning_effort in this release.',
         },
         service_tier: {
           type: 'string',
           enum: ['fast', 'flex', 'normal'],
-          description: 'Backend-applied speed tier for Codex. Omit to inherit the parent run setting.',
+          description: 'Backend-applied speed tier for Codex. Omit to inherit the parent run setting. Claude and Cursor do not support this field.',
         },
         metadata: { type: 'object', additionalProperties: true },
         idle_timeout_seconds: {
@@ -158,7 +158,7 @@ export const tools = [
   },
   {
     name: 'get_backend_status',
-    description: 'Diagnose local Codex and Claude worker CLI availability without making model calls.',
+    description: 'Diagnose local Codex and Claude worker CLI availability and the Cursor SDK module without making model calls.',
     inputSchema: { type: 'object', properties: {} },
   },
   {

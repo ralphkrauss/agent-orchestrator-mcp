@@ -47,6 +47,12 @@ describe('MCP tool registration', () => {
     assert.equal(Object.hasOwn(observability.properties, 'diagnostics'), true);
   });
 
+  it('advertises cursor as a direct backend in the start_run schema', () => {
+    const start = schemaFor('start_run');
+    const backend = start.properties.backend as { enum: string[] };
+    assert.deepStrictEqual([...backend.enum].sort(), ['claude', 'codex', 'cursor']);
+  });
+
   it('keeps advertised input schemas compatible with OpenCode tool loading', () => {
     for (const tool of tools) {
       const schema = schemaFor(tool.name);

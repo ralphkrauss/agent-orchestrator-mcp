@@ -1,9 +1,14 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { BackendStatusReportSchema, ObservabilitySnapshotSchema, RunLatestErrorSchema, RunSummarySchema, RunTerminalReasonSchema, StartRunInputSchema, SendFollowupInputSchema, WorkerResultSchema, wrapErr, wrapOk, orchestratorError } from '../contract.js';
+import { BackendSchema, BackendStatusReportSchema, ObservabilitySnapshotSchema, RunLatestErrorSchema, RunSummarySchema, RunTerminalReasonSchema, StartRunInputSchema, SendFollowupInputSchema, WorkerResultSchema, wrapErr, wrapOk, orchestratorError } from '../contract.js';
 import { deriveObservedResult } from '../backend/resultDerivation.js';
 
 describe('contract schemas and envelopes', () => {
+  it('exposes the cursor backend value alongside codex and claude', () => {
+    assert.deepStrictEqual([...BackendSchema.options].sort(), ['claude', 'codex', 'cursor']);
+    assert.equal(BackendSchema.parse('cursor'), 'cursor');
+  });
+
   it('accepts known-good run summaries and worker results', () => {
     RunSummarySchema.parse({
       run_id: '01HX0000000000000000000000',

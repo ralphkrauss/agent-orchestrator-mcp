@@ -26,6 +26,10 @@ node dist/cli.js
 - Node.js 22 or newer.
 - Codex CLI installed and authenticated if you want Codex workers.
 - Claude CLI installed and authenticated if you want Claude workers.
+- `@cursor/sdk` installed (ships as an optional dependency) and `CURSOR_API_KEY`
+  exported in the daemon environment if you want Cursor workers. Cursor runs
+  use the SDK in-process, local runtime only; tokens are billed to your Cursor
+  account. See `docs/development/cursor-backend.md`.
 
 Linux and macOS use Unix sockets and POSIX process groups. Windows uses a
 per-store named pipe for daemon IPC and `taskkill` for worker process-tree
@@ -48,6 +52,7 @@ Diagnostics check:
 - Node version
 - run-store accessibility
 - `codex` and `claude` binary presence
+- `@cursor/sdk` module resolvability and `CURSOR_API_KEY` presence
 - resolved binary path
 - version when available
 - required help/subcommand flag support
@@ -249,9 +254,13 @@ Environment fallbacks use the `AGENT_ORCHESTRATOR_OPENCODE_*` prefix, including
 `AGENT_ORCHESTRATOR_OPENCODE_SMALL_MODEL`, and
 `AGENT_ORCHESTRATOR_OPENCODE_BIN`.
 
-The current package supports Codex and Claude worker backends, but the profiles
-manifest is provider-agnostic. Future backends can add capability descriptors
-without changing the supervisor workflow.
+The current package supports Codex, Claude, and Cursor worker backends.
+Cursor uses the `@cursor/sdk` module in-process (local runtime only) and
+requires `CURSOR_API_KEY`; cursor profiles must declare `model` and must omit
+`reasoning_effort` and `service_tier` (see
+`docs/development/cursor-backend.md`). The profiles manifest stays
+provider-agnostic so future backends can add capability descriptors without
+changing the supervisor workflow.
 
 OpenCode permissions are application-level guardrails, not an operating-system
 sandbox. For stronger enforcement, run the supervisor in a read-only worktree
@@ -428,7 +437,7 @@ Expected operational failures use `{ ok: false, error }`. MCP `isError: true` is
 | `get_backend_status` | `{}` | `{ status: BackendStatusReport }` |
 | `get_observability_snapshot` | `{ limit?: number, include_prompts?: boolean, recent_event_limit?: number, diagnostics?: boolean }` | `{ snapshot: ObservabilitySnapshot }` |
 | `list_worker_profiles` | `{ profiles_file?: string, cwd?: string }` | `{ profiles_file: string, profiles: WorkerProfile[] }` |
-| `start_run` | Profile mode: `{ profile: string, profiles_file?: string, prompt: string, cwd: string, metadata?: object, idle_timeout_seconds?: number, execution_timeout_seconds?: number }`; direct mode: `{ backend: "codex" \| "claude", prompt: string, cwd: string, model?: string, reasoning_effort?: string, service_tier?: string, metadata?: object, idle_timeout_seconds?: number, execution_timeout_seconds?: number }` | `{ run_id: string }` |
+| `start_run` | Profile mode: `{ profile: string, profiles_file?: string, prompt: string, cwd: string, metadata?: object, idle_timeout_seconds?: number, execution_timeout_seconds?: number }`; direct mode: `{ backend: "codex" \| "claude" \| "cursor", prompt: string, cwd: string, model?: string, reasoning_effort?: string, service_tier?: string, metadata?: object, idle_timeout_seconds?: number, execution_timeout_seconds?: number }` | `{ run_id: string }` |
 | `list_runs` | `{}` | `{ runs: RunSummary[] }` |
 | `get_run_status` | `{ run_id: string }` | `{ run_summary: RunSummary }` |
 | `get_run_events` | `{ run_id: string, after_sequence?: number, limit?: number }` | `{ events: WorkerEvent[], next_sequence: number, has_more: boolean }` |

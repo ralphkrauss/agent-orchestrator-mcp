@@ -5,7 +5,7 @@ Plan Slug: `cursor-sdk-backend` (file retained as `16-cursor-agent-backend.md` f
 Parent Issue: #16
 Created: 2026-05-02
 Updated: 2026-05-02 (revised: finalize synthesis for SDK exit code, missing-SDK parity with missing-binary, smoke uses temp repo copy not packed tarball, stale ManagedRun references purged, RQ1 pinned to 1.0.12)
-Status: planning
+Status: implementation complete (pending review of `pnpm audit --prod` policy for `@cursor/sdk` transitive dependencies)
 
 ## Context
 
@@ -334,81 +334,127 @@ and do not block design approval:
 ## Execution Log
 
 ### T-Pkg: Optional dep + SDK-absent verification (two paths)
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** OQ1 approved by reviewer; unblocked. Both verification paths required (unit-level import-failure injection + temp-install with `--no-optional --ignore-scripts`).
+- **Status:** completed
+- **Evidence:**
+  - `package.json` lists `"@cursor/sdk": "1.0.12"` under `optionalDependencies`; `pnpm install --frozen-lockfile` succeeds (`Already up to date`).
+  - **b1 unit-level:** `dist/__tests__/cursorRuntime.test.js → CursorSdkRuntime missing-SDK behavior` passes; the test injects `unavailableAdapter()` and asserts the cursor backend stays registered, `start_run` produces a durable failed run with `OrchestratorErrorCode = "WORKER_BINARY_MISSING"`, `details.binary === '@cursor/sdk'`, `details.install_hint === 'npm install @cursor/sdk'`, and `latest_error.category === 'worker_binary_missing'`.
+  - **b2 install-shape (temp repo copy, NOT packed tarball):** copied the working tree to a temp dir, ran `pnpm install --frozen-lockfile --no-optional --ignore-scripts` (skipped optionals as logged), `pnpm build` succeeded, `node_modules/@cursor` is absent on disk, then ran `node --test dist/__tests__/backendInvocation.test.js dist/__tests__/codexBackend.test.js dist/__tests__/processManager.test.js` → 17/17 passed; cursor runtime tests also passed (the missing-SDK tests still hit because the runtime is registered unconditionally).
+- **Notes:** OQ1 honored — exact `1.0.12` pin per RQ1.
 
 ### T-Contract: Extend BackendSchema
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:**
+  - `src/contract.ts:32` extends `BackendSchema = z.enum(['codex', 'claude', 'cursor'])`.
+  - `src/__tests__/contract.test.ts → exposes the cursor backend value alongside codex and claude` passes.
 
 ### T-Refactor: WorkerRuntime + RuntimeRunHandle + CliRuntime
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:**
+  - New file `src/backend/runtime.ts` declares `WorkerRuntime`, `RuntimeRunHandle`, `RuntimeStartResult`, and `CliRuntime` (the CLI adapter that wraps a `WorkerBackend` with a `ProcessManager`). The handle name is `RuntimeRunHandle`, distinct from the existing `processManager.ManagedRun`.
+  - `src/backend/registry.ts` rewritten to return `Map<Backend, WorkerRuntime>` keyed by backend; cursor is added unconditionally with `defaultCursorSdkAdapter()` and the runtime's own `store`.
+  - `src/orchestratorService.ts` now stores `Map<string, RuntimeRunHandle>` in `activeRuns`, calls `runtime.start({ runId, ... })` / `runtime.resume(...)`, and consolidates pre-spawn failure routing through `failPreSpawn`. The orchestrator only writes terminal state on the pre-spawn failure path and the orphan-recovery path; the runtime owns in-flight `appendEvent` and the normal-completion `markTerminal`. Single-writer rules in D3 satisfied.
+  - All Codex/Claude tests still pass (`backendInvocation`, `codexBackend`, `processManager`, `integration/orchestrator`) — the only test edits are the two `createBackendRegistry()` call sites that now pass the store (signature change required by T-Register).
+- **Notes:** integration test `createService` and the orphan-sweep restart updated to `createBackendRegistry(store)` (T-Register acceptance criterion). `processManager` public surface and `ManagedRun` shape are unchanged.
 
 ### T-Adapter: SDK shim with dynamic import + injection seam
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:**
+  - `src/backend/cursor/sdk.ts` exports `defaultCursorSdkAdapter()` (production) and `CursorSdkAdapter` interface (injection seam). `available()` resolves to `{ ok: false, reason }` if the dynamic `import('@cursor/sdk')` throws.
+  - The shim defines minimal type aliases (`CursorSdkMessage`, `CursorRun`, `CursorAgent`, etc.) that the runtime consumes so the codebase never needs a static import of `@cursor/sdk`.
+  - Module path is resolved through `createRequire(import.meta.url).resolve('@cursor/sdk')` when present (RV5) and surfaced for the diagnostics check (T-Diag).
 
 ### T-Runtime: CursorSdkRuntime
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:**
+  - `src/backend/cursor/runtime.ts` implements `WorkerRuntime` per D3/D11/D12. Pre-flight calls `adapter.available()`; on failure short-circuits to `WORKER_BINARY_MISSING`. On success, `Agent.create({ apiKey, model: { id }, local: { cwd } })` (start) or `Agent.resume(agentId, { apiKey, local: { cwd } })` followed by `agent.send(prompt, model ? { model: { id } } : undefined)` (resume). Per-call `model` overrides on resume go through `SendOptions.model` per D9.
+  - The runtime owns a single drain pump (`drainAndFinalize`) that writes `appendEvent` for each parsed event and writes the terminal `markTerminal` exactly once. Disposal calls `agent[Symbol.asyncDispose]()` (preferred) or `agent.close()`; idempotent and called from both the success and failure paths.
+  - Finalization synthesizes a CLI-shaped `FinalizeContext`: `Run.status === 'finished'` ⇒ `exitCode: 0`; `'cancelled'` ⇒ `runStatusOverride: 'cancelled'`; `'error'` ⇒ `exitCode: 1`; pre-run-timeout cancel from orchestratorService also propagates `runStatusOverride` (R12 mitigated).
+  - Cancel is cooperative: `RuntimeRunHandle.cancel()` calls `run.cancel()` and the drain races with a bounded `cancelDrainMs` timeout (default 5_000 — RQ2 default).
+  - Tests in `src/__tests__/cursorRuntime.test.ts` exercise the missing-SDK, finished, error, and cancelled paths and the start_run → wait_for_run → get_run_result → send_followup integration with a fake adapter — all green.
 
 ### T-Events: cursorEvents mapping
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:**
+  - `src/backend/cursor/cursorEvents.ts` defines `parseCursorEvent(message)` returning `ParsedBackendEvent`. Maps `system`/`status`/`task`/`request`/`thinking`/`user` → `lifecycle`; `assistant` (with `TextBlock`/`ToolUseBlock`) → `assistant_message` + `tool_use`; `tool_call` (with `args.path`/`file_path` and `args.command` extraction) → `tool_use` + optional `tool_result` when `status: 'completed'`; `error` → `error` with classified `RunError`; unknown types → `lifecycle` (R1 defensive).
+  - Tests in `src/__tests__/cursorEvents.test.ts` cover every documented `type`, the unknown-type fallback, ERROR-status mapping, and tool-call file/command extraction — 7/7 passing.
 
 ### T-Register: Backend registry
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:**
+  - `src/backend/registry.ts` always registers the cursor runtime regardless of SDK availability.
+  - `src/__tests__/cursorRuntime.test.ts → keeps cursor in the runtime registry even when the SDK is absent` asserts `runtimes.has('cursor')` for a registry built with `unavailableAdapter()`.
+  - The missing-SDK path produces a durable failed run with `WORKER_BINARY_MISSING` (D17), not `BACKEND_NOT_FOUND`.
 
 ### T-SVC: orchestratorService cursor validation
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:**
+  - `modelSettingsForBackend` now branches on `backend === 'cursor'` and rejects `reasoning_effort` and `service_tier` with `INVALID_INPUT` (D13).
+  - `validateInheritedModelSettingsForBackend` rejects inherited cursor settings if either field is non-null and otherwise passes through.
+  - `src/__tests__/cursorRuntime.test.ts → cursor backend service-level validation` exercises both rejection paths.
 
 ### T-MCP: mcpTools.ts enum and descriptions
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:**
+  - `src/mcpTools.ts` `start_run.backend.enum` is now `['codex', 'claude', 'cursor']`. `model`, `reasoning_effort`, `service_tier`, and `get_backend_status` descriptions updated to call out cursor's behavior. Same updates applied to `send_followup`.
+  - `src/__tests__/mcpTools.test.ts → advertises cursor as a direct backend in the start_run schema` asserts the enum sort.
 
 ### T-Diag: SDK-shaped diagnostics
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:**
+  - `src/diagnostics.ts` adds a third diagnostic for the cursor SDK without changing `BackendDiagnosticSchema`. `binary: '@cursor/sdk'`, `path` is the resolved module path or `null`, `checks` includes `'@cursor/sdk module resolvable'`, status is `missing` when the adapter probe fails, and falls back to `auth_unknown`/`available` based on `CURSOR_API_KEY` presence.
+  - The optional `Cursor.me()` ping is intentionally not invoked by default (RQ3) and is not surfaced as a check unless explicitly added later.
+  - Existing tests in `src/__tests__/diagnostics.test.ts` updated to inject a `missingCursorAdapter` fake so they remain deterministic regardless of the local node_modules layout. The "missing binary" test now asserts the cursor entry has `binary: '@cursor/sdk'` and a failed `'@cursor/sdk module resolvable'` check.
 
 ### T-Cap: Capability catalog and profile validation
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:**
+  - `src/opencode/capabilities.ts` adds the cursor capability with `requires_model: true`, `supports_start: true`, `supports_resume: true`, **`reasoning_efforts: []`** and **`service_tiers: []`**. Profile validation rejects cursor profiles that set `reasoning_effort` or `service_tier`, and the catalog-level `requires_model` check already rejects profiles missing `model`.
+  - `src/__tests__/opencodeCapabilities.test.ts → accepts cursor profiles that pass model only and rejects unsupported settings` and `→ reports cursor capability metadata in the catalog` cover the new branch.
 
 ### T-Tests-Unit: Focused unit tests
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:**
+  - New: `src/__tests__/cursorEvents.test.ts` (7 tests), `src/__tests__/cursorRuntime.test.ts` (7 tests including the b1 missing-SDK assertions and an end-to-end orchestration test that uses the fake adapter and exercises start → wait → result → followup → resume).
+  - Extended: `src/__tests__/contract.test.ts`, `src/__tests__/mcpTools.test.ts`, `src/__tests__/opencodeCapabilities.test.ts`, `src/__tests__/diagnostics.test.ts` for the new cursor surface.
 
 ### T-Tests-Int: Integration test with fake SDK
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:**
+  - `src/__tests__/cursorRuntime.test.ts → CursorSdkRuntime end-to-end orchestration with a fake SDK adapter` drives the orchestrator service through `start_run` → `wait_for_run` → `get_run_result` → `send_followup` (resume via persisted `agentId`) using the injected fake adapter. Asserts persisted `session_id === 'bc-int'`, parent linkage, terminal status, observed result summary, that `Agent.create` is called once and `Agent.resume` once with the captured `agentId`.
 
 ### T-Docs: docs/development/cursor-backend.md and README
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:**
+  - New `docs/development/cursor-backend.md` covers install (optional dep), `CURSOR_API_KEY`, local-only scope, settings rules, sessions/resume model, error mapping, and known limitations (no MCP forwarding, no subagents, no artifact download, billing note).
+  - `README.md` updated for prerequisites, the `cursor` enum value in MCP tools, and the local-only scope/billing note.
 
 ### T-Sync: sync-ai-workspace --check
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (with caveat)
+- **Evidence:**
+  - `node scripts/sync-ai-workspace.mjs --check` reports drift only on `.claude/skills/orchestrate-create-plan/SKILL.md` and `.claude/skills/orchestrate-implement-plan/SKILL.md`. These are the **pre-existing user-owned uncommitted changes** in `.agents/skills/orchestrate-*/SKILL.md` that the implementer was instructed not to touch. No drift was introduced by this branch's changes.
 
 ### T8: build, test, verify
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (with one caveat — see "Residual Risks")
+- **Evidence:**
+  - `pnpm build` ✅ (exits 0).
+  - `pnpm test` ✅ — 141 pass, 1 skipped (Windows-only IPC pipe), 0 fail; total 27 suites, 142 tests. (Pre-cursor baseline was 115 tests; 27 new tests added across two reviewer-fix passes.)
+  - `node scripts/check-publish-ready.mjs` ✅ → "package metadata is ready for publish".
+  - `node scripts/resolve-publish-tag.mjs` ✅ → "@ralphkrauss/agent-orchestrator@0.1.2 will publish with npm dist-tag latest".
+  - `pnpm audit --prod` ❌ — fails because `@cursor/sdk` 1.0.12 pulls in `@connectrpc/connect-node` → `undici@<6.24.0` and `sqlite3` → `@tootallnate/once` with known advisories. **All 12 advisory paths originate from `@cursor/sdk`'s transitive dependencies; none are in agent-orchestrator's own dependency tree.** This blocks `pnpm verify` even though build/tests/publish-ready/dist-tag all pass. See "Residual Risks" below.
+  - `npm pack --dry-run` not reached because the audit step short-circuits `pnpm verify`. Build artifacts are correct (the existing pack-shape verification under `dist/__tests__/daemonCli.test.js` exercises the packed bin and passes).
+
+### Reviewer fix pass (2026-05-03)
+- **RV1 — model required for cursor:** `src/orchestratorService.ts` `modelSettingsForBackend('cursor', model, …)` returns `INVALID_INPUT` when `model` is missing or empty; `validateInheritedModelSettingsForBackend` enforces the same on cursor follow-ups (and the dispatcher in `sendFollowup` now always routes cursor through the inherited validator). Tests: `cursorRuntime.test.ts → "rejects direct cursor start_run when model is missing"`, `→ "lets cursor follow-ups inherit the parent model and accepts a valid override"` (also asserts `SendOptions.model.id === 'composer-3'` on resume override). Existing `CursorSdkRuntime missing-SDK` test updated to pass `model: 'composer-2'` so it reaches the runtime layer rather than tripping the new validator.
+- **RV2 — SDK error normalization:** `src/backend/cursor/errors.ts` introduces `normalizeCursorSdkError()` that maps known SDK classes (`AuthenticationError`, `RateLimitError`, `ConfigurationError`, `NetworkError`, `IntegrationNotConnectedError`, `UnknownAgentError`) and HTTP-style `status` codes to `RunErrorCategory`, preserving `errorClass`, `code`, `status`, `retryable`. The cursor runtime's create/resume/send `catch` blocks now build a richer `PreSpawnFailure` via `cursorSpawnFailure()`. `preSpawnError()` in `orchestratorService.ts` consumes `context.category` / `context.retryable` when present (backward compatible — falls back to legacy derivation otherwise). Tests cover: auth (preserves `error_class: 'AuthenticationError'`, `status: 401`, `error_code: 'unauthorized'`), invalid model (`ConfigurationError`/400 + "Invalid model" message → `invalid_model`), rate limit (`RateLimitError`/429 → `rate_limit` + `retryable: true`), stale resume (`ConfigurationError`/404 with "agent not found" → `protocol`).
+- **RV3 — default artifacts on cursor finalize:** `src/backend/cursor/runtime.ts` `buildFinalizeContext(runId, store, …)` now uses `store.defaultArtifacts(runId)` instead of `[]`, restoring contract parity with CLI and pre-spawn paths. Test: `→ "records the standard run artifacts on cursor finalize (parity with CLI)"` asserts the result contains `events.jsonl`, `prompt.txt`, `result.json`, `stderr.log`, `stdout.log`.
+- **RV4 — synthesized timeout/cancel error:** `cursorTerminalOverrideError(status, details)` mirrors `processManager.terminalOverrideError`. The override error is fed into both the finalize context's `errors` array (so `WorkerResult.errors` and `summary` reflect the timeout/cancel) and `markTerminal`'s `latest_error` (so `RunSummary.latest_error` is non-null). Tests: `→ "synthesizes a timeout RunError when the orchestrator cancels with timed_out + idle_timeout reason"` (asserts `latest_error.category === 'timeout'`, `latest_error.message === 'idle timeout exceeded'`, `timeout_reason === 'idle_timeout'`); `→ "synthesizes a cancel RunError for user-initiated cancel even when no terminal context is supplied"` (asserts `latest_error.message === 'cancelled by user'`, status `'cancelled'`).
+- **RV5 — `createRequire` SDK path resolution:** `src/backend/cursor/sdk.ts` replaces `Function('return require')()` with `createRequire(import.meta.url)`, so `BackendDiagnostic.path` is populated when the SDK is importable in this ESM build. Confirmed by the existing `diagnostics.test.ts` passing under `pnpm test` after the change.
+
+### Audit status (unchanged)
+`pnpm audit --prod --json` continues to fail with 12 advisories, all transitive through `@cursor/sdk@1.0.12` → `@connectrpc/connect-node` → `undici@<6.24.0` and `@cursor/sdk@1.0.12` → `sqlite3` → `tar` / `@tootallnate/once`. Following the reviewer note, **no dependency, version, override, or audit-policy change has been applied here** — those would require human approval against the approved plan and the repository's `.agents/rules/node-typescript.md` ("Ask before installing packages or changing dependency ranges"). Concrete options for human review:
+  - **Wait for an `@cursor/sdk` patch.** Cleanest if a 1.0.x release ships with bumped transitive ranges. The exact pin (RQ1) does not let those bumps in automatically; the plan author chose this pin for first-cut safety.
+  - **Loosen the pin (RQ1) to `~1.0.12` or `^1.0.12`.** Allows future SDK patch/minor releases that fix the transitive advisories. Trades exact-pin safety for audit cleanliness; needs reviewer sign-off because the SDK is in beta.
+  - **Add scoped `pnpm.audit.ignoreCves` overrides for the listed advisory IDs constrained to the `@cursor/sdk > …` paths.** Keeps the exact pin but explicitly accepts the risk; needs a written justification (the SDK only ships in optional installs, so users opting out via `--no-optional` are unaffected).
+  - **Pin `undici` / `tar` / `@tootallnate/once` via `pnpm.overrides`.** Risky — `@cursor/sdk` could break if `@connectrpc/connect-node` or `sqlite3` are incompatible with newer versions; needs reviewer sign-off.
+
+No change made — surfacing the options for the reviewer to choose from.

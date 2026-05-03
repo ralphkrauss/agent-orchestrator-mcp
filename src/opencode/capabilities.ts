@@ -84,6 +84,25 @@ export function createWorkerCapabilityCatalog(statusReport?: BackendStatusReport
         },
         notes: ['Use direct Claude model ids; aliases such as opus or sonnet can drift.'],
       },
+      {
+        backend: 'cursor',
+        display_name: 'Cursor SDK',
+        ...availabilityFor('cursor', diagnostics.get('cursor')?.status),
+        supports_start: true,
+        supports_resume: true,
+        requires_model: true,
+        settings: {
+          reasoning_efforts: [],
+          service_tiers: [],
+          variants: [],
+        },
+        notes: [
+          'Uses the @cursor/sdk module in-process (local runtime only); cloud and self-hosted runtimes are out of scope for this release.',
+          'Sessions persist as Cursor agent ids; follow-ups call Agent.resume(agentId).',
+          'Tokens are billed to your Cursor account.',
+          'reasoning_effort and service_tier are rejected for cursor in this release.',
+        ],
+      },
     ],
   };
 }
@@ -159,10 +178,22 @@ function validateProfile(profileId: string, profile: WorkerProfile, capability: 
 
 function validateBackendSpecificProfile(profileId: string, profile: WorkerProfile): string[] {
   if (profile.backend === 'codex') return validateCodexProfile(profileId, profile);
+  if (profile.backend === 'cursor') return validateCursorProfile(profileId, profile);
   if (profile.backend !== 'claude') return [];
 
   const error = validateClaudeModelAndEffort(profile.model, profile.reasoning_effort);
   return error ? [`profile ${profileId}: ${error}`] : [];
+}
+
+function validateCursorProfile(profileId: string, profile: WorkerProfile): string[] {
+  const errors: string[] = [];
+  if (profile.reasoning_effort) {
+    errors.push(`profile ${profileId} sets reasoning_effort which the cursor backend rejects in this release`);
+  }
+  if (profile.service_tier) {
+    errors.push(`profile ${profileId} sets service_tier which the cursor backend rejects`);
+  }
+  return errors;
 }
 
 function validateCodexProfile(profileId: string, profile: WorkerProfile): string[] {

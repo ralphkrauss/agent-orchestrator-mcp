@@ -13,9 +13,15 @@ let originalPath = process.env.PATH;
 let originalOpenAiKey = process.env.OPENAI_API_KEY;
 let originalCodexKey = process.env.CODEX_API_KEY;
 let originalAnthropicKey = process.env.ANTHROPIC_API_KEY;
+let originalCursorKey = process.env.CURSOR_API_KEY;
 let originalPathext = process.env.PATHEXT;
 let originalComSpec = process.env.ComSpec;
 let originalComspec = process.env.COMSPEC;
+
+const missingCursorAdapter = {
+  available: async () => ({ ok: false as const, reason: 'cursor SDK not installed in test fixture' }),
+  loadAgentApi: async () => { throw new Error('cursor SDK not installed in test fixture'); },
+};
 
 describe('backend diagnostics', () => {
   beforeEach(() => {
@@ -23,12 +29,14 @@ describe('backend diagnostics', () => {
     originalOpenAiKey = process.env.OPENAI_API_KEY;
     originalCodexKey = process.env.CODEX_API_KEY;
     originalAnthropicKey = process.env.ANTHROPIC_API_KEY;
+    originalCursorKey = process.env.CURSOR_API_KEY;
     originalPathext = process.env.PATHEXT;
     originalComSpec = process.env.ComSpec;
     originalComspec = process.env.COMSPEC;
     delete process.env.OPENAI_API_KEY;
     delete process.env.CODEX_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.CURSOR_API_KEY;
   });
 
   afterEach(() => {
@@ -36,6 +44,7 @@ describe('backend diagnostics', () => {
     restoreEnv('OPENAI_API_KEY', originalOpenAiKey);
     restoreEnv('CODEX_API_KEY', originalCodexKey);
     restoreEnv('ANTHROPIC_API_KEY', originalAnthropicKey);
+    restoreEnv('CURSOR_API_KEY', originalCursorKey);
     restoreEnv('PATHEXT', originalPathext);
     restoreEnv('ComSpec', originalComSpec);
     restoreEnv('COMSPEC', originalComspec);
@@ -45,27 +54,31 @@ describe('backend diagnostics', () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-diag-missing-'));
     process.env.PATH = join(root, 'missing-bin');
 
-    const report = await getBackendStatus();
+    const report = await getBackendStatus({ cursorSdkAdapter: missingCursorAdapter });
 
     assert.equal(report.frontend_version, getPackageVersion());
     assert.equal(report.daemon_version, null);
     assert.equal(report.version_match, false);
     assert.equal(report.daemon_pid, null);
     assert.equal(report.posix_supported, true);
-    assert.deepStrictEqual(report.backends.map((backend) => backend.status), ['missing', 'missing']);
+    assert.deepStrictEqual(report.backends.map((backend) => backend.status), ['missing', 'missing', 'missing']);
     assert.ok(report.backends.every((backend) => backend.hints.length > 0));
+    const cursor = report.backends.find((backend) => backend.name === 'cursor');
+    assert.equal(cursor?.binary, '@cursor/sdk');
+    assert.ok(cursor?.checks.some((check) => check.name === '@cursor/sdk module resolvable' && !check.ok));
   });
 
   it('runs backend diagnostics on Windows instead of marking everything unsupported', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-diag-win-missing-'));
     process.env.PATH = join(root, 'missing-bin');
 
-    const report = await getBackendStatus({ platform: 'win32' });
+    const report = await getBackendStatus({ platform: 'win32', cursorSdkAdapter: missingCursorAdapter });
 
     assert.equal(report.platform, 'win32');
     assert.equal(report.posix_supported, false);
-    assert.deepStrictEqual(report.backends.map((backend) => backend.status), ['missing', 'missing']);
-    assert.ok(report.backends.every((backend) => backend.checks.some((check) => check.name.includes('binary on PATH'))));
+    assert.deepStrictEqual(report.backends.map((backend) => backend.status), ['missing', 'missing', 'missing']);
+    const cliBackends = report.backends.filter((backend) => backend.name !== 'cursor');
+    assert.ok(cliBackends.every((backend) => backend.checks.some((check) => check.name.includes('binary on PATH'))));
   });
 
   it('executes Windows cmd backend shims through the command processor', async () => {
@@ -90,13 +103,13 @@ describe('backend diagnostics', () => {
       delete process.env.COMSPEC;
     }
 
-    const report = await getBackendStatus({ platform: 'win32' });
+    const report = await getBackendStatus({ platform: 'win32', cursorSdkAdapter: missingCursorAdapter });
 
     assert.equal(report.platform, 'win32');
     assert.equal(report.posix_supported, false);
-    assert.deepStrictEqual(report.backends.map((backend) => backend.status), ['auth_unknown', 'auth_unknown']);
-    assert.deepStrictEqual(report.backends.map((backend) => backend.version), ['codex 1.2.3', 'claude 2.3.4']);
-    assert.ok(report.backends.every((backend) => backend.checks.every((check) => check.ok)));
+    assert.deepStrictEqual(report.backends.map((backend) => backend.status), ['auth_unknown', 'auth_unknown', 'missing']);
+    assert.deepStrictEqual(report.backends.filter((backend) => backend.name !== 'cursor').map((backend) => backend.version), ['codex 1.2.3', 'claude 2.3.4']);
+    assert.ok(report.backends.filter((backend) => backend.name !== 'cursor').every((backend) => backend.checks.every((check) => check.ok)));
   });
 
   it('reports auth_unknown when binaries and required flags exist but auth cannot be proven locally', async () => {
@@ -112,11 +125,11 @@ describe('backend diagnostics', () => {
     ]);
     process.env.PATH = prependPath(bin, originalPath);
 
-    const report = await getBackendStatus();
+    const report = await getBackendStatus({ cursorSdkAdapter: missingCursorAdapter });
 
-    assert.deepStrictEqual(report.backends.map((backend) => backend.status), ['auth_unknown', 'auth_unknown']);
-    assert.deepStrictEqual(report.backends.map((backend) => backend.version), ['codex 1.2.3', 'claude 2.3.4']);
-    assert.ok(report.backends.every((backend) => backend.checks.every((check) => check.ok)));
+    assert.deepStrictEqual(report.backends.map((backend) => backend.status), ['auth_unknown', 'auth_unknown', 'missing']);
+    assert.deepStrictEqual(report.backends.filter((backend) => backend.name !== 'cursor').map((backend) => backend.version), ['codex 1.2.3', 'claude 2.3.4']);
+    assert.ok(report.backends.filter((backend) => backend.name !== 'cursor').every((backend) => backend.checks.every((check) => check.ok)));
   });
 
   it('reports available when an auth environment variable is present', async () => {
@@ -134,10 +147,11 @@ describe('backend diagnostics', () => {
     process.env.OPENAI_API_KEY = 'test-openai';
     process.env.ANTHROPIC_API_KEY = 'test-anthropic';
 
-    const report = await getBackendStatus();
+    const report = await getBackendStatus({ cursorSdkAdapter: missingCursorAdapter });
 
-    assert.deepStrictEqual(report.backends.map((backend) => backend.status), ['available', 'available']);
-    assert.deepStrictEqual(report.backends.map((backend) => backend.auth.status), ['ready', 'ready']);
+    const cli = report.backends.filter((backend) => backend.name !== 'cursor');
+    assert.deepStrictEqual(cli.map((backend) => backend.status), ['available', 'available']);
+    assert.deepStrictEqual(cli.map((backend) => backend.auth.status), ['ready', 'ready']);
   });
 
   it('exposes the same diagnostics through the orchestrator MCP dispatch path', async () => {
@@ -155,7 +169,8 @@ describe('backend diagnostics', () => {
     ]);
     process.env.PATH = prependPath(bin, originalPath);
 
-    const service = new OrchestratorService(new RunStore(join(root, 'home')), createBackendRegistry());
+    const diagnosticsStore = new RunStore(join(root, 'home'));
+    const service = new OrchestratorService(diagnosticsStore, createBackendRegistry(diagnosticsStore));
     await service.initialize();
     const result = await service.dispatch('get_backend_status', {}, { frontend_version: getPackageVersion() }) as { ok: boolean; status?: { frontend_version: string; daemon_version: string | null; version_match: boolean; daemon_pid: number | null; backends: { status: string }[] } };
 
@@ -164,7 +179,10 @@ describe('backend diagnostics', () => {
     assert.equal(result.status?.daemon_version, getPackageVersion());
     assert.equal(result.status?.version_match, true);
     assert.equal(result.status?.daemon_pid, process.pid);
-    assert.deepStrictEqual(result.status?.backends.map((backend) => backend.status), ['auth_unknown', 'auth_unknown']);
+    const reported = result.status?.backends ?? [];
+    assert.equal(reported.find((backend) => (backend as { name?: string }).name === 'codex')?.status, 'auth_unknown');
+    assert.equal(reported.find((backend) => (backend as { name?: string }).name === 'claude')?.status, 'auth_unknown');
+    assert.ok(reported.some((backend) => (backend as { name?: string }).name === 'cursor'));
   });
 
   it('reports unsupported when required model flags are missing', async () => {
@@ -180,10 +198,11 @@ describe('backend diagnostics', () => {
     ]);
     process.env.PATH = prependPath(bin, originalPath);
 
-    const report = await getBackendStatus();
+    const report = await getBackendStatus({ cursorSdkAdapter: missingCursorAdapter });
 
-    assert.deepStrictEqual(report.backends.map((backend) => backend.status), ['unsupported', 'unsupported']);
-    assert.ok(report.backends.every((backend) => backend.checks.some((check) => !check.ok && check.message?.includes('--model'))));
+    const cli = report.backends.filter((backend) => backend.name !== 'cursor');
+    assert.deepStrictEqual(cli.map((backend) => backend.status), ['unsupported', 'unsupported']);
+    assert.ok(cli.every((backend) => backend.checks.some((check) => !check.ok && check.message?.includes('--model'))));
   });
 });
 

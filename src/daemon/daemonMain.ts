@@ -24,7 +24,7 @@ async function main(): Promise<void> {
   await cleanupIpcEndpoint();
 
   const store = new RunStore(paths.home);
-  const service = new OrchestratorService(store, createBackendRegistry(), log);
+  const service = new OrchestratorService(store, createBackendRegistry(store), log);
   await service.initialize();
 
   ipcServer = new IpcServer(paths.ipc.path, async (method, params, context) => service.dispatch(method, params, context));

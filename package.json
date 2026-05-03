@@ -54,6 +54,9 @@
     "ulid": "^2.4.0",
     "zod": "^3.25.76"
   },
+  "optionalDependencies": {
+    "@cursor/sdk": "1.0.12"
+  },
   "devDependencies": {
     "@types/node": "^22.15.18",
     "typescript": "^5.9.3"

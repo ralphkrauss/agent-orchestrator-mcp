@@ -27,19 +27,18 @@ import {
   type RunStatus,
   type RunModelSettings,
   type RunError,
+  type RunErrorCategory,
   type ServiceTier,
   type ToolResponse,
   type WorkerResult,
 } from './contract.js';
-import type { WorkerBackend } from './backend/WorkerBackend.js';
 import { validateClaudeModelAndEffort } from './backend/claudeValidation.js';
-import { resolveBinary } from './backend/common.js';
+import type { RuntimeRunHandle, WorkerRuntime } from './backend/runtime.js';
 import { getBackendStatus } from './diagnostics.js';
 import { captureGitSnapshot } from './gitSnapshot.js';
 import { buildObservabilitySnapshot } from './observability.js';
 import { createWorkerCapabilityCatalog, type ValidatedWorkerProfile } from './opencode/capabilities.js';
 import { getPackageVersion } from './packageMetadata.js';
-import { ProcessManager, type ManagedRun } from './processManager.js';
 import { RunStore } from './runStore.js';
 import { loadValidatedWorkerProfilesFromFile, resolveWorkerProfilesFile } from './workerRouting.js';
 
@@ -73,7 +72,7 @@ export interface OrchestratorDispatchContext {
 
 interface ResolvedStartRunTarget {
   backendName: Backend;
-  backend: WorkerBackend;
+  runtime: WorkerRuntime;
   model: string | null;
   reasoningEffort: ReasoningEffort | undefined;
   serviceTier: ServiceTier | undefined;
@@ -81,19 +80,16 @@ interface ResolvedStartRunTarget {
 }
 
 export class OrchestratorService {
-  private readonly processManager: ProcessManager;
-  private readonly activeRuns = new Map<string, ManagedRun>();
+  private readonly activeRuns = new Map<string, RuntimeRunHandle>();
   private readonly timers = new Map<string, NodeJS.Timeout>();
   private config: OrchestratorConfig = defaultConfig;
   private shuttingDown = false;
 
   constructor(
     readonly store: RunStore,
-    private readonly backends: Map<Backend, WorkerBackend>,
+    private readonly runtimes: Map<Backend, WorkerRuntime>,
     private readonly logger: OrchestratorLogger = defaultLogger,
-  ) {
-    this.processManager = new ProcessManager(store);
-  }
+  ) {}
 
   async initialize(): Promise<void> {
     await this.store.ensureReady();
@@ -148,7 +144,7 @@ export class OrchestratorService {
     const input = parsed.data;
     const resolved = await this.resolveStartRunTarget(input);
     if (!resolved.ok) return wrapErr(resolved.error);
-    const { backendName, backend, model, reasoningEffort, serviceTier, metadata } = resolved.value;
+    const { backendName, runtime, model, reasoningEffort, serviceTier, metadata } = resolved.value;
     const idleTimeout = this.resolveIdleTimeout(input.idle_timeout_seconds);
     if (!idleTimeout.ok) return wrapErr(idleTimeout.error);
     const executionTimeout = this.resolveExecutionTimeout(input.execution_timeout_seconds);
@@ -170,7 +166,7 @@ export class OrchestratorService {
     });
     await this.captureAndPersistGitSnapshot(meta.run_id, input.cwd);
 
-    await this.startManagedRun(meta.run_id, backend, input.prompt, input.cwd, idleTimeout.value, executionTimeout.value, settings.value, undefined, model ?? undefined);
+    await this.startManagedRun(meta.run_id, runtime, input.prompt, input.cwd, idleTimeout.value, executionTimeout.value, settings.value, model, undefined);
     return wrapOk({ run_id: meta.run_id });
   }
 
@@ -179,13 +175,13 @@ export class OrchestratorService {
       if (!input.backend) {
         return { ok: false, error: orchestratorError('INVALID_INPUT', 'Direct worker starts require backend') };
       }
-      const backend = this.backends.get(input.backend);
-      if (!backend) return { ok: false, error: orchestratorError('BACKEND_NOT_FOUND', `Backend not found: ${input.backend}`) };
+      const runtime = this.runtimes.get(input.backend);
+      if (!runtime) return { ok: false, error: orchestratorError('BACKEND_NOT_FOUND', `Backend not found: ${input.backend}`) };
       return {
         ok: true,
         value: {
           backendName: input.backend,
-          backend,
+          runtime,
           model: input.model ?? null,
           reasoningEffort: input.reasoning_effort,
           serviceTier: input.service_tier,
@@ -226,8 +222,8 @@ export class OrchestratorService {
         }),
       };
     }
-    const backend = this.backends.get(backendName.data);
-    if (!backend) {
+    const runtime = this.runtimes.get(backendName.data);
+    if (!runtime) {
       return {
         ok: false,
         error: orchestratorError('BACKEND_NOT_FOUND', `Backend not found: ${backendName.data}`, {
@@ -243,7 +239,7 @@ export class OrchestratorService {
       ok: true,
       value: {
         backendName: backendName.data,
-        backend,
+        runtime,
         model: profile.model ?? null,
         reasoningEffort: profileSettings.reasoningEffort,
         serviceTier: profileSettings.serviceTier,
@@ -313,8 +309,8 @@ export class OrchestratorService {
     }
 
     const backendName = BackendSchema.parse(parent.meta.backend);
-    const backend = this.backends.get(backendName);
-    if (!backend) return wrapErr(orchestratorError('BACKEND_NOT_FOUND', `Backend not found: ${backendName}`));
+    const runtime = this.runtimes.get(backendName);
+    if (!runtime) return wrapErr(orchestratorError('BACKEND_NOT_FOUND', `Backend not found: ${backendName}`));
     const idleTimeout = this.resolveIdleTimeout(parsed.data.idle_timeout_seconds);
     if (!idleTimeout.ok) return wrapErr(idleTimeout.error);
     const executionTimeout = this.resolveExecutionTimeout(parsed.data.execution_timeout_seconds);
@@ -324,7 +320,7 @@ export class OrchestratorService {
     const modelSource: ModelSource = parsed.data.model ? 'explicit' : parent.meta.model ? 'inherited' : 'backend_default';
     const settings = hasModelSettingsInput(parsed.data)
       ? modelSettingsForBackend(backendName, model, parsed.data.reasoning_effort, parsed.data.service_tier)
-      : parsed.data.model
+      : parsed.data.model || backendName === 'cursor'
         ? validateInheritedModelSettingsForBackend(backendName, model, parent.meta.model_settings)
         : { ok: true as const, value: parent.meta.model_settings };
     if (!settings.ok) return wrapErr(settings.error);
@@ -346,7 +342,7 @@ export class OrchestratorService {
     });
     await this.captureAndPersistGitSnapshot(meta.run_id, parent.meta.cwd);
 
-    await this.startManagedRun(meta.run_id, backend, parsed.data.prompt, parent.meta.cwd, idleTimeout.value, executionTimeout.value, settings.value, resumeSessionId, model);
+    await this.startManagedRun(meta.run_id, runtime, parsed.data.prompt, parent.meta.cwd, idleTimeout.value, executionTimeout.value, settings.value, model, resumeSessionId);
     return wrapOk({ run_id: meta.run_id });
   }
 
@@ -453,46 +449,42 @@ export class OrchestratorService {
 
   private async startManagedRun(
     runId: string,
-    backend: WorkerBackend,
+    runtime: WorkerRuntime,
     prompt: string,
     cwd: string,
     idleTimeoutSeconds: number,
     executionTimeoutSeconds: number | null,
     modelSettings: RunModelSettings,
-    sessionId?: string,
-    model?: string | null,
+    model: string | null | undefined,
+    sessionId: string | undefined,
   ): Promise<void> {
     try {
       await access(cwd, constants.R_OK | constants.W_OK);
     } catch (error) {
-      await this.failPreSpawn(runId, backendNameFor(backend), 'cwd is not readable and writable', { error: error instanceof Error ? error.message : String(error) });
+      await this.failPreSpawn(runId, runtime.name, 'cwd is not readable and writable', { error: error instanceof Error ? error.message : String(error) });
       return;
     }
 
-    const binary = await resolveBinary(backend.binary);
-    if (!binary) {
-      await this.failPreSpawn(runId, backendNameFor(backend), `Worker binary not found: ${backend.binary}`, { code: 'WORKER_BINARY_MISSING', binary: backend.binary });
+    const startInput = { runId, prompt, cwd, model, modelSettings };
+    const result = sessionId
+      ? await runtime.resume(sessionId, startInput)
+      : await runtime.start(startInput);
+    if (!result.ok) {
+      const failure = result.failure;
+      await this.failPreSpawn(runId, runtime.name, failure.message, { ...failure.details, code: failure.code });
       return;
     }
 
-    try {
-      const invocation = sessionId
-        ? await backend.resume(sessionId, { prompt, cwd, model, modelSettings })
-        : await backend.start({ prompt, cwd, model, modelSettings });
-      invocation.command = binary;
-      const managed = await this.processManager.start(runId, backend, invocation);
-      this.activeRuns.set(runId, managed);
-      this.armRunTimer(runId, idleTimeoutSeconds, executionTimeoutSeconds, managed);
-      managed.completion.finally(() => {
-        this.clearRunTimer(runId);
-        this.activeRuns.delete(runId);
-        if (this.shuttingDown && this.activeRuns.size === 0) {
-          scheduleProcessExit();
-        }
-      }).catch(() => undefined);
-    } catch (error) {
-      await this.failPreSpawn(runId, backendNameFor(backend), 'Failed to spawn worker process', { error: error instanceof Error ? error.message : String(error) });
-    }
+    const handle = result.handle;
+    this.activeRuns.set(runId, handle);
+    this.armRunTimer(runId, idleTimeoutSeconds, executionTimeoutSeconds, handle);
+    handle.completion.finally(() => {
+      this.clearRunTimer(runId);
+      this.activeRuns.delete(runId);
+      if (this.shuttingDown && this.activeRuns.size === 0) {
+        scheduleProcessExit();
+      }
+    }).catch(() => undefined);
   }
 
   private async failPreSpawn(runId: string, backend: Backend, message: string, context: Record<string, unknown>): Promise<void> {
@@ -526,7 +518,7 @@ export class OrchestratorService {
     }
   }
 
-  private armRunTimer(runId: string, idleTimeoutSeconds: number, executionTimeoutSeconds: number | null, managed: ManagedRun): void {
+  private armRunTimer(runId: string, idleTimeoutSeconds: number, executionTimeoutSeconds: number | null, managed: RuntimeRunHandle): void {
     const idleTimeoutMs = idleTimeoutSeconds * 1000;
     const startedMs = Date.now();
     const hardDeadlineMs = executionTimeoutSeconds === null ? null : startedMs + (executionTimeoutSeconds * 1000);
@@ -643,22 +635,23 @@ function unknownRun(runId: string): ToolResult {
   return wrapErr(orchestratorError('UNKNOWN_RUN', `Unknown run: ${runId}`));
 }
 
-function backendNameFor(backend: WorkerBackend): Backend {
-  return BackendSchema.parse(backend.name);
-}
-
 function preSpawnError(backend: Backend, message: string, context: Record<string, unknown>): RunError {
   const code = typeof context.code === 'string' ? context.code : null;
-  return {
-    message,
-    category: code === 'WORKER_BINARY_MISSING'
+  const explicitCategory = typeof context.category === 'string' ? context.category as RunErrorCategory : null;
+  const explicitRetryable = typeof context.retryable === 'boolean' ? context.retryable : null;
+  const category: RunErrorCategory = explicitCategory ?? (
+    code === 'WORKER_BINARY_MISSING'
       ? 'worker_binary_missing'
       : message.toLowerCase().includes('cwd')
         ? 'permission'
-        : 'backend_unavailable',
+        : 'backend_unavailable'
+  );
+  return {
+    message,
+    category,
     source: 'pre_spawn',
     backend,
-    retryable: code !== 'WORKER_BINARY_MISSING',
+    retryable: explicitRetryable ?? (code !== 'WORKER_BINARY_MISSING'),
     fatal: true,
     context,
   };
@@ -733,6 +726,26 @@ function modelSettingsForBackend(
     };
   }
 
+  if (backend === 'cursor') {
+    if (reasoningEffort !== undefined) {
+      return { ok: false, error: orchestratorError('INVALID_INPUT', 'Cursor backend does not support reasoning_effort in this release; pass model only') };
+    }
+    if (serviceTier !== undefined) {
+      return { ok: false, error: orchestratorError('INVALID_INPUT', 'Cursor backend does not support service_tier; pass model only') };
+    }
+    if (typeof model !== 'string' || model.trim() === '') {
+      return { ok: false, error: orchestratorError('INVALID_INPUT', 'Cursor backend requires an explicit model id (no backend default); set the model field') };
+    }
+    return {
+      ok: true,
+      value: {
+        reasoning_effort: null,
+        service_tier: null,
+        mode: null,
+      },
+    };
+  }
+
   if (serviceTier !== undefined) {
     return { ok: false, error: orchestratorError('INVALID_INPUT', 'Claude does not support service_tier; set reasoning_effort and model only') };
   }
@@ -753,6 +766,15 @@ function validateInheritedModelSettingsForBackend(
   model: string | null | undefined,
   settings: RunModelSettings,
 ): { ok: true; value: RunModelSettings } | { ok: false; error: OrchestratorError } {
+  if (backend === 'cursor') {
+    if (settings.reasoning_effort !== null || settings.service_tier !== null) {
+      return { ok: false, error: orchestratorError('INVALID_INPUT', 'Cursor backend does not support reasoning_effort or service_tier; clear them before sending a follow-up') };
+    }
+    if (typeof model !== 'string' || model.trim() === '') {
+      return { ok: false, error: orchestratorError('INVALID_INPUT', 'Cursor backend requires an explicit model id; the parent run does not provide one to inherit') };
+    }
+    return { ok: true, value: settings };
+  }
   if (backend !== 'claude') return { ok: true, value: settings };
   const reasoningEffort = parseReasoningEffort(settings.reasoning_effort);
   const error = validateClaudeModelAndEffort(model, reasoningEffort);
