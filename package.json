@@ -55,7 +55,7 @@
     "zod": "^3.25.76"
   },
   "optionalDependencies": {
-    "@cursor/sdk": "1.0.12"
+    "@cursor/sdk": "^1.0.12"
   },
   "devDependencies": {
     "@types/node": "^22.15.18",
