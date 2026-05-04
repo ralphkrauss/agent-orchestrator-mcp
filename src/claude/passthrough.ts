@@ -41,7 +41,6 @@ const ALLOWED_FLAG_TOKENS = new Set<string>([
   '--verbose',
   '--debug',
   '-d',
-  '--debug-file',
   '--name',
   '-n',
   '--exclude-dynamic-system-prompt-sections',

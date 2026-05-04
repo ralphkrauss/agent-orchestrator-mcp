@@ -113,6 +113,33 @@ describe('Claude surface discovery', () => {
     assert.equal(report.recommended_path, 'isolated_envelope', '--disallowed-tools is not required because deny rules live in settings');
   });
 
+  it('treats non-empty stderr as usable output when stdout is empty (some Claude builds write --help / --version to stderr)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'fake-claude-stderr-'));
+    const path = join(dir, 'claude');
+    const script = [
+      '#!/usr/bin/env bash',
+      'if [ "$1" = "--version" ]; then',
+      '  echo "99.0.0 (fake)" 1>&2',
+      '  exit 0',
+      'fi',
+      'if [ "$1" = "--help" ]; then',
+      `  cat <<'__HELP__' 1>&2`,
+      FULL_HELP,
+      '__HELP__',
+      '  exit 0',
+      'fi',
+      'exit 1',
+      '',
+    ].join('\n');
+    await writeFile(path, script, { mode: 0o755 });
+    await chmod(path, 0o755);
+    const report = await discoverClaudeSurface(path);
+    assert.equal(report.recommended_path, 'isolated_envelope');
+    assert.match(report.version ?? '', /99\.0\.0/);
+    assert.equal(report.surfaces.tools_flag, true);
+    assert.equal(report.surfaces.allowed_tools_flag, true);
+  });
+
   it('summarizeReport mentions the monitor-related required surfaces', async () => {
     const binary = await fakeClaudeBinary(FULL_HELP);
     const report = await discoverClaudeSurface(binary);

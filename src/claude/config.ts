@@ -11,7 +11,6 @@ import {
   stringifyClaudeSupervisorSettings,
   type ClaudeSupervisorSettings,
 } from './permission.js';
-import { resolveMonitorPin, type ResolvedMonitorPin } from './monitorPin.js';
 
 export interface ClaudeHarnessConfigInput {
   targetCwd: string;
@@ -22,7 +21,6 @@ export interface ClaudeHarnessConfigInput {
   profiles?: ValidatedWorkerProfiles;
   profileDiagnostics: string[];
   mcpCliPath: string;
-  monitorPin: ResolvedMonitorPin;
 }
 
 export interface ClaudeMcpConfig {
@@ -40,14 +38,10 @@ export interface ClaudeHarnessConfig {
   appendSystemPrompt?: string;
   settings: ClaudeSupervisorSettings;
   mcpConfig: ClaudeMcpConfig;
-  monitorPin: ResolvedMonitorPin;
 }
 
 export function buildClaudeHarnessConfig(input: ClaudeHarnessConfigInput): ClaudeHarnessConfig {
-  const monitorPin = input.monitorPin ?? resolveMonitorPin();
-  const settings = buildClaudeSupervisorSettings({
-    monitorBashAllowlistPattern: monitorPin.bash_allowlist_pattern,
-  });
+  const settings = buildClaudeSupervisorSettings();
   const mcpConfig: ClaudeMcpConfig = {
     mcpServers: {
       [CLAUDE_MCP_SERVER_NAME]: {
@@ -58,10 +52,9 @@ export function buildClaudeHarnessConfig(input: ClaudeHarnessConfigInput): Claud
     },
   };
   return {
-    systemPrompt: buildSupervisorSystemPrompt(input, monitorPin),
+    systemPrompt: buildSupervisorSystemPrompt(input),
     settings,
     mcpConfig,
-    monitorPin,
   };
 }
 
@@ -77,7 +70,7 @@ export {
   stringifyClaudeSupervisorSettings,
 };
 
-function buildSupervisorSystemPrompt(input: ClaudeHarnessConfigInput, monitorPin: ResolvedMonitorPin): string {
+function buildSupervisorSystemPrompt(input: ClaudeHarnessConfigInput): string {
   const allowedMcpTools = claudeOrchestratorMcpToolAllowList();
   return [
     'You are the Agent Orchestrator supervisor running inside an isolated Claude Code envelope.',
@@ -87,7 +80,7 @@ function buildSupervisorSystemPrompt(input: ClaudeHarnessConfigInput, monitorPin
     '- The only skills reachable are project-owned orchestrate-* skills curated for this session.',
     '- Slash commands, sub-agents, hooks, and project skills outside orchestrate-* are not loaded.',
     `- Permitted built-in tools: ${[...CLAUDE_SUPERVISOR_BUILTIN_TOOLS].join(', ')}, plus the agent-orchestrator MCP tools listed below.`,
-    `- Bash is allowed only for the pinned monitor command pattern: Bash(${monitorPin.bash_allowlist_pattern}). Do not request any other Bash command.`,
+    '- Bash is not available in this envelope. Do not request it. The supervisor waits for runs through the agent-orchestrator MCP notification surface.',
     '- Edit, Write, WebFetch, WebSearch, Task, NotebookEdit, and TodoWrite are not available. Do not request them.',
     '- The supervisor cannot directly read files outside this envelope. To inspect or modify the target workspace, dispatch a worker run via mcp__agent-orchestrator__start_run with cwd set to the target workspace; the worker has full access in its own session.',
     '- Do not inspect Claude Code internal files under .claude/projects or tool-results. MCP tool responses are authoritative.',
@@ -106,26 +99,18 @@ function buildSupervisorSystemPrompt(input: ClaudeHarnessConfigInput, monitorPin
     '',
     'Run supervision decision rules:',
     '- MCP tools are the source of truth for starting runs, fetching run status/events/results, cancelling runs, and reconciling durable notifications.',
-    '- Bash is only a notification-wait handle for the pinned monitor command. Do not use Bash to start workers, inspect the workspace, poll status, or run arbitrary shell commands.',
     '- For each active run, use exactly one active wait mechanism at a time.',
     '',
     'Progress and status checks:',
     '- When the user asks what happened, asks for progress, or asks for status on a worker run, call mcp__agent-orchestrator__get_run_progress first. It returns bounded recent event summaries and text snippets.',
     '- Use mcp__agent-orchestrator__get_run_status for lifecycle metadata and mcp__agent-orchestrator__get_run_result for terminal results.',
     '- Use mcp__agent-orchestrator__get_run_events only when raw events are explicitly needed. Keep limit small, normally 5-20, and use after_sequence cursors.',
-    '- Never use Bash, jq, cat, head, tail, grep, rg, sed, awk, or Claude Code tool-result files to inspect MCP results or worker progress.',
     '',
     'Primary wake path for runs started in this turn:',
-    '- After each start_run or send_followup returns a run_id, immediately launch exactly one Bash background task using Bash run_in_background: true with the exact command shape below.',
-    `- Primary monitor command: ${monitorPin.command_prefix_string} monitor <run_id> --json-line`,
-    `- Cursored monitor command: ${monitorPin.command_prefix_string} monitor <run_id> --json-line --since <notification_id>`,
-    '- While a Bash monitor is active for a run, do not call any MCP blocking wait tool for that run. The monitor is the wait.',
-    '- When the monitor exits, parse its single JSON line, update the notification cursor from notification_id, then call get_run_result or get_run_status via MCP to fetch authoritative state.',
-    '',
-    'Monitor recovery path:',
-    '- If you inherit active run_ids without live monitor handles and need to block during the current turn, launch a new pinned Bash monitor for each run instead of using MCP wait tools.',
-    '- Use the cursored monitor command with --since <notification_id> when you already have a notification cursor, so an old notification does not wake the supervisor twice.',
-    '- Do not call wait_for_any_run or wait_for_run in the Claude supervisor. They are MCP blocking wait tools for non-Claude clients and are intentionally not allowlisted here.',
+    '- After each start_run or send_followup returns a run_id, immediately call mcp__agent-orchestrator__wait_for_any_run with run_ids: [<run_id>, ...], wait_seconds: 60, kinds: ["terminal","fatal_error"], and after_notification_id set to the highest notification_id you have seen so far.',
+    '- Repeat the call until it returns a notification or wait_exceeded: true. On wait_exceeded, call again immediately; this is the cursored wait, not a poll loop.',
+    '- When wait_for_any_run returns a notification, parse notification_id, then call mcp__agent-orchestrator__get_run_result or mcp__agent-orchestrator__get_run_status to fetch authoritative state, and call mcp__agent-orchestrator__ack_run_notification once handled.',
+    '- Do not call mcp__agent-orchestrator__wait_for_run in this envelope. Single-run blocking waits are denied; use wait_for_any_run with the run_ids you care about.',
     '',
     'Cross-turn reconciliation:',
     '- Maintain a notification cursor across the session: keep the highest notification_id you have seen.',

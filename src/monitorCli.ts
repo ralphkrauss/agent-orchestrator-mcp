@@ -86,6 +86,10 @@ the wake notification and exits with the documented exit-code table:
   4  unknown run
   5  daemon unavailable
   6  argument error
+
+This CLI is for non-Claude clients (e.g. external monitoring tools).
+\`--json-line\` is currently always on and is reserved for forward-compat
+with future non-JSON output; the contract is one JSON line per wake.
 `;
 }
 

@@ -3,11 +3,14 @@ import { tools as mcpTools } from '../mcpTools.js';
 export const CLAUDE_MCP_SERVER_NAME = 'agent-orchestrator';
 
 /**
- * Built-in Claude Code tools available to the supervisor. Bash is included so
- * the supervisor can launch the pinned daemon monitor as a background task; the
- * launcher pre-approves only `Bash(<agent-orchestrator> monitor *)`.
+ * Built-in Claude Code tools available to the supervisor. Bash is intentionally
+ * excluded: a `Bash(<prefix> *)` allowlist glob does not constrain shell
+ * metacharacters in the suffix, so any pinned monitor prefix could be followed
+ * by `;`, `&&`, `|`, command substitution, or redirection and Claude would
+ * still pre-approve the line. The supervisor waits for runs through the MCP
+ * notification surface (`wait_for_any_run` / `list_run_notifications`) instead.
  */
-export const CLAUDE_SUPERVISOR_BUILTIN_TOOLS = ['Read', 'Glob', 'Grep', 'Bash'] as const;
+export const CLAUDE_SUPERVISOR_BUILTIN_TOOLS = ['Read', 'Glob', 'Grep'] as const;
 
 export interface ClaudeSupervisorSettings {
   permissions: {
@@ -20,11 +23,13 @@ export interface ClaudeSupervisorSettings {
   enabledPlugins: Record<string, never>;
 }
 
-export interface ClaudeSupervisorPermissionInput {
-  monitorBashAllowlistPattern: string;
-}
-
-const CLAUDE_SUPERVISOR_DENIED_MCP_TOOL_NAMES = ['wait_for_any_run', 'wait_for_run'] as const;
+// `wait_for_any_run` and `list_run_notifications` are the supervisor's primary
+// wake path; only `wait_for_run` (single-run blocking wait) stays denied since
+// it is the wrong shape for a Claude-style supervisor.
+const CLAUDE_SUPERVISOR_DENIED_MCP_TOOL_NAMES = ['wait_for_run'] as const;
+// Defense-in-depth: even though Bash is no longer in the built-in tool list,
+// keep the deny patterns in case a future Claude release leaks Bash through
+// `--tools`. They have no effect when Bash is not part of the surface.
 const CLAUDE_SUPERVISOR_DENIED_BASH_PATTERNS = [
   'Bash(jq *)',
   'Bash(cat *)',
@@ -55,23 +60,20 @@ export function claudeOrchestratorMcpToolDenyList(): string[] {
     .sort();
 }
 
-export function buildClaudeAllowedToolsList(input: ClaudeSupervisorPermissionInput): string[] {
+export function buildClaudeAllowedToolsList(): string[] {
   return [
     'Read',
     'Glob',
     'Grep',
-    `Bash(${input.monitorBashAllowlistPattern})`,
     ...claudeOrchestratorMcpToolAllowList(),
   ];
 }
 
-export function buildClaudeSupervisorSettings(input: ClaudeSupervisorPermissionInput): ClaudeSupervisorSettings {
-  const allow = buildClaudeAllowedToolsList(input);
-  // Do not deny bare Bash here: Claude Code deny rules shadow narrower
-  // `Bash(...)` allow rules. The launcher constrains Bash through `--tools`,
-  // `--allowed-tools`, and `--permission-mode dontAsk`, while these explicit
-  // deny entries provide defense in depth for write/exfil tools and common
-  // shell-inspection fallbacks that should use MCP tools instead.
+export function buildClaudeSupervisorSettings(): ClaudeSupervisorSettings {
+  const allow = buildClaudeAllowedToolsList();
+  // Defense-in-depth deny entries: write/exfil tools and shell-inspection
+  // fallbacks remain explicitly denied even though the built-in tool list and
+  // `--allowed-tools` already exclude them.
   const deny = [
     'Edit',
     'Write',

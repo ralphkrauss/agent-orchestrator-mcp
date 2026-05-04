@@ -11,14 +11,13 @@ export interface ClaudeSurfaceReport {
     setting_sources_flag: boolean;
     /**
      * `--tools` is the load-bearing built-in availability restriction. The
-     * supervisor envelope sets `--tools "Read,Glob,Grep,Bash"` so Bash exists
-     * only for the pinned monitor command while Edit/Write/etc. are
-     * unavailable as built-ins. Required.
+     * supervisor envelope sets `--tools "Read,Glob,Grep"` so Edit/Write/Bash
+     * etc. are unavailable as built-ins. Required.
      */
     tools_flag: boolean;
     /**
-     * `--allowed-tools` pre-approves the pinned `Bash(<prefix> monitor *)`
-     * pattern. Required for background monitor supervision.
+     * `--allowed-tools` pre-approves the agent-orchestrator MCP tools the
+     * supervisor uses to wait for and reconcile run notifications. Required.
      */
     allowed_tools_flag: boolean;
     /**
@@ -28,9 +27,8 @@ export interface ClaudeSurfaceReport {
      */
     disallowed_tools_flag: boolean;
     /**
-     * `--permission-mode dontAsk` prevents permission prompts for unallowed
-     * tool calls. Required once Bash is part of the built-in surface for the
-     * pinned monitor.
+     * `--permission-mode dontAsk` denies non-allowlisted tool calls without
+     * surfacing a permission prompt to the supervisor. Required.
      */
     permission_mode_flag: boolean;
     /**
@@ -63,7 +61,7 @@ const EXPECTED_FLAGS: { key: keyof ClaudeSurfaceReport['surfaces']; pattern: Reg
   // the --bare description as `--append-system-prompt[-file]`. Both forms
   // indicate the file variant is supported.
   { key: 'append_system_prompt_file_flag', pattern: /--append-system-prompt(?:-file|\[-file\])/, required: true },
-  // --allowed-tools pre-approves the pinned Bash monitor pattern. The harness
+  // --allowed-tools pre-approves the agent-orchestrator MCP tools. The harness
   // still relies on --tools for built-in availability and dontAsk for deny-by-
   // default behavior, but this flag is required because it is passed at spawn.
   { key: 'allowed_tools_flag', pattern: /--allowed[Tt]ools\b|--allowed-tools\b/, required: true },
@@ -162,11 +160,19 @@ function runOnce(binary: string, args: string[], timeoutMs: number): Promise<str
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      if (code !== 0 && stdoutChunks.length === 0) {
-        reject(new Error(`${binary} ${args.join(' ')} exited with code ${code}: ${Buffer.concat(stderrChunks).toString('utf8').trim()}`));
+      const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+      const stderr = Buffer.concat(stderrChunks).toString('utf8');
+      if (stdout.length > 0) {
+        resolve(stdout);
         return;
       }
-      resolve(Buffer.concat(stdoutChunks).toString('utf8'));
+      if (stderr.length > 0) {
+        // Some Claude builds write --help / --version output to stderr while
+        // exiting non-zero. Treat any non-empty stream as usable output.
+        resolve(stderr);
+        return;
+      }
+      reject(new Error(`${binary} ${args.join(' ')} exited with code ${code}${stderr.trim() ? `: ${stderr.trim()}` : ''}`));
     });
   });
 }

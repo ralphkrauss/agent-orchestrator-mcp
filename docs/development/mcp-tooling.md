@@ -99,9 +99,9 @@ subcommands and any option token after `run`, including `--agent`, `--attach`,
 A second supervisor harness ships in this repo and is positioned as the
 **recommended rich-feature** harness when its primitives are needed (strong
 isolation flags such as `--strict-mcp-config`, `--setting-sources ""`,
-`--tools`, pinned background Bash monitors, generated skill / settings / MCP
-injection, stable isolated Claude project paths, and daemon-owned durable
-notification reconciliation). The OpenCode
+`--tools`, generated skill / settings / MCP injection, stable isolated Claude
+project paths, and daemon-owned durable notification reconciliation). The
+OpenCode
 harness above remains a fully supported peer; both are documented side-by-side
 and there is no deprecation:
 
@@ -126,19 +126,23 @@ supervisor login persists without exposing the user's normal `~/.claude`. The
 durable `HOME` contains `.claude` because Claude Code account auth is read from
 `HOME/.claude`; `AGENT_ORCHESTRATOR_HOME` remains explicit so the embedded MCP
 server still uses the normal daemon store. The spawn passes
-`--strict-mcp-config`, `--setting-sources ""`, `--tools
-"Read,Glob,Grep,Bash"` (read-only inspection tools plus Bash for the pinned
-monitor command), `--allowed-tools` with
-`Bash(<node> <agent-orchestrator> monitor *)` plus the Claude-specific safe MCP
-allowlist, `--permission-mode dontAsk`, `--append-system-prompt-file`, and
+`--strict-mcp-config`, `--setting-sources ""`, `--tools "Read,Glob,Grep"`
+(read-only inspection tools only; Bash is intentionally excluded because a
+`Bash(<prefix> *)` glob does not constrain shell metacharacters in the
+suffix), `--allowed-tools` with the comma-joined Read/Glob/Grep set plus the
+Claude-specific safe MCP allowlist (including
+`mcp__agent-orchestrator__wait_for_any_run` and
+`mcp__agent-orchestrator__list_run_notifications` as the supervisor's wake
+path), `--permission-mode dontAsk`, `--append-system-prompt-file`, and
 redirects `HOME`, `XDG_CONFIG_HOME`, and `CLAUDE_CONFIG_DIR` to that durable
-state directory. MCP blocking wait tools are denied for Claude. The launcher never passes
-`--dangerously-skip-permissions`, does not use
-`--disable-slash-commands` (that flag would also disable orchestrate-* skill
-discovery), does not use `--add-dir` (Claude scans add-dir paths for project
-`.claude/*` and `CLAUDE.md` which would re-introduce target leakage), and keeps
-user-supplied `--tools`, `--allowed-tools`, and `--permission-mode` forbidden
-because the harness owns those surfaces.
+state directory. `wait_for_run` (single-run blocking wait) is denied for the
+Claude supervisor. The launcher never passes `--dangerously-skip-permissions`,
+does not use `--disable-slash-commands` (that flag would also disable
+orchestrate-* skill discovery), does not use `--add-dir` (Claude scans
+add-dir paths for project `.claude/*` and `CLAUDE.md` which would
+re-introduce target leakage), and keeps user-supplied `--tools`,
+`--allowed-tools`, and `--permission-mode` forbidden because the harness
+owns those surfaces.
 
 Because the supervisor cannot directly read files from the target workspace,
 worker runs are dispatched with `cwd = <target workspace>` via
@@ -175,21 +179,17 @@ Both harnesses share daemon-owned, backend-agnostic notification primitives:
   extracted text snippets. Supervisors should prefer it for user-facing
   progress/status checks instead of fetching large raw event pages or parsing
   client tool-result files.
-- `agent-orchestrator monitor <run_id>` is a one-shot CLI used by the Claude
-  harness through pinned `Bash run_in_background: true`, and it can also be
-  run from a user shell. The CLI prints exactly one JSON line when a terminal
-  or fatal-error notification arrives; it is not a live event stream. The CLI
-  exits with `0` completed, `1`
+- `agent-orchestrator monitor <run_id>` is a one-shot CLI for non-Claude
+  clients (e.g. external monitoring tools and user shells). The CLI prints
+  exactly one JSON line when a terminal or fatal-error notification arrives;
+  it is not a live event stream. Exit codes: `0` completed, `1`
   failed/orphaned, `2` cancelled, `3` timed_out, `10` fatal_error, `4`
-  unknown run, `5` daemon unavailable, `6` argument error, and prints
-  exactly one JSON line for the wake notification.
-- Claude uses one blocking wait path: MCP starts/fetches state, the Bash
-  monitor is the normal current-turn wake path, and
-  `list_run_notifications` is cross-turn reconciliation. If a later turn
-  inherits an active run without a live monitor handle, Claude relaunches the
-  same pinned monitor, using `--since <notification_id>` when it has a cursor.
-  Claude is not allowlisted for MCP blocking wait tools (`wait_for_any_run` or
-  `wait_for_run`).
+  unknown run, `5` daemon unavailable, `6` argument error.
+- Claude uses MCP-only supervision: `wait_for_any_run` is the normal
+  current-turn wake path (cursored 60-second chunks), and
+  `list_run_notifications` is cross-turn reconciliation. `wait_for_run` is
+  denied for the Claude supervisor because single-run blocking waits are the
+  wrong shape for a Claude-style supervisor.
 - OpenCode uses MCP-only supervision: `wait_for_any_run` is the normal
   current-turn wake path, `wait_for_run` is compatibility fallback, and
   `list_run_notifications` is cross-turn reconciliation. OpenCode does not
@@ -320,9 +320,9 @@ Guardrails:
 - avoid concurrent worker runs against the same dirty working tree unless that
   is the task
 - supervise long-running workers with the harness-specific path documented
-  above: Claude uses only the pinned Bash monitor for blocking waits, OpenCode
-  and generic notification-aware MCP clients use bounded `wait_for_any_run`,
-  and `wait_for_run` is only a compatibility fallback for single-run clients
+  above: Claude and OpenCode both use bounded `wait_for_any_run` over MCP, and
+  `wait_for_run` is only a compatibility fallback for single-run clients
+  (denied for the Claude supervisor)
 - inspect `latest_error`, `timeout_reason`, `terminal_reason`, and
   `get_run_progress` before backing off; fatal backend errors should be reported or routed
   immediately instead of waiting for the idle timeout

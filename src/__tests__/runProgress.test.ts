@@ -13,6 +13,7 @@ interface RunProgressResponse {
     next_sequence: number;
     has_more: boolean;
     latest_event_sequence: number | null;
+    latest_event_at: string | null;
     latest_text: string | null;
     recent_events: Array<{
       seq: number;
@@ -66,6 +67,8 @@ describe('get_run_progress', () => {
     assert.equal(progress.progress.next_sequence, 3);
     assert.equal(progress.progress.has_more, true);
     assert.equal(progress.progress.latest_text, 'Second update.');
+    assert.equal(progress.progress.latest_event_sequence, 4, 'cursor pages must still expose latest_event_sequence');
+    assert.match(progress.progress.latest_event_at ?? '', /\d{4}-\d{2}-\d{2}T/);
   });
 
   it('returns UNKNOWN_RUN for missing runs', async () => {

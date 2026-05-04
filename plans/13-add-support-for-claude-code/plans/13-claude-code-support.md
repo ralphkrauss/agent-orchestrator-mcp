@@ -55,19 +55,19 @@ This plan covers three interleaved deliverables, sequenced **B → A → C**:
   and update the docs so both harnesses are described side-by-side with
   Claude framed as the recommended rich-feature option when available.
 
-Current implementation note: the Claude supervisor exposes `Bash` only for the
-pinned monitor command pattern
-`Bash(<node> <agent-orchestrator> monitor *)`, runs with
-`--permission-mode dontAsk`, and launches
-`agent-orchestrator monitor <run_id> --json-line` via
-`Bash run_in_background: true` after `start_run`. If a live monitor handle is
-missing, Claude relaunches the same pinned monitor, using `--since
-<notification_id>` when it has a cursor. `list_run_notifications` remains the
-cross-turn reconciliation path. The MCP blocking wait tools (`wait_for_any_run`
-and `wait_for_run`) remain registered for non-Claude clients but are not
-allowlisted for the Claude supervisor. Earlier execution-log entries that
-removed in-envelope Bash or left MCP waits as a Claude fallback are superseded
-by the latest follow-up at the end of this plan.
+Current implementation note: the Claude supervisor's built-in tool surface is
+`Read`, `Glob`, `Grep` only — Bash is intentionally excluded because a
+`Bash(<prefix> *)` allowlist glob does not constrain shell metacharacters in
+the suffix. The supervisor runs with `--permission-mode dontAsk` and waits for
+runs through `mcp__agent-orchestrator__wait_for_any_run` (cursored 60-second
+chunks), reconciles cross-turn with
+`mcp__agent-orchestrator__list_run_notifications`, and acks handled
+notifications with `mcp__agent-orchestrator__ack_run_notification`.
+`wait_for_run` (single-run blocking wait) is denied for the Claude supervisor
+because that shape is wrong for a Claude-style supervisor; it remains
+registered for non-Claude clients. The earlier "pinned background Bash
+monitor" wake path was retracted during PR #26 review on security grounds and
+is superseded by the plan amendment at the end of this plan.
 
 Envelope persistence note: earlier decision text that describes a random
 per-launch temp envelope is superseded by follow-up #10. The current Claude
@@ -932,3 +932,48 @@ and supervisor session history/resume was fragmented by the changing cwd.
   reuse the same envelope path, stale poisoned discovery files are cleared on
   relaunch, and cleanup no longer removes the stable cwd. README and MCP
   tooling docs describe the stable-envelope behavior.
+
+## Plan Amendment (2026-05-04, PR #26 review): Bash retired, MCP wake path
+
+- **What changed (A9):** the original plan's "pinned background Bash monitor"
+  wake path is retracted. `CLAUDE_SUPERVISOR_BUILTIN_TOOLS` is now
+  `['Read', 'Glob', 'Grep']` and the launcher no longer adds any
+  `Bash(<prefix> ...)` entry to `--allowed-tools` or
+  `settings.permissions.allow`. The supervisor waits via
+  `mcp__agent-orchestrator__wait_for_any_run` (cursored 60-second chunks) and
+  reconciles with `mcp__agent-orchestrator__list_run_notifications` /
+  `ack_run_notification`. `wait_for_run` stays denied. `monitorPin.ts` is
+  removed; the external `agent-orchestrator monitor` CLI is preserved for
+  non-Claude clients.
+- **Why:** a `Bash(<prefix> *)` allowlist glob does not constrain shell
+  metacharacters in the suffix. The supervisor could append `;`, `&&`, `|`,
+  command substitution, redirection, or extra flags after the approved prefix
+  and Claude would still pre-approve the line, breaking the deny-by-default
+  isolation contract. The targeted `Bash(jq *)` / `Bash(cat *)` denies do not
+  catch suffix injection behind the allowed prefix.
+- **What changed (A10):** `--debug-file` is removed from the passthrough
+  allowlist. It would let a caller specify a path outside the daemon-owned
+  envelope/state dir, breaking the "Claude only writes inside `${stateDir}`"
+  invariant. Both `--debug-file=/path` and `--debug-file /path` forms now hit
+  the "rejects unknown flag" branch in `validateClaudePassthroughArgs`.
+- **What changed (B1):** `RunStore.markTerminal` now appends the terminal (and
+  any `fatal_error`) notification inside `withRunLock`, immediately after the
+  meta/result/event writes. `RunStore.ensureReady` runs an idempotent
+  `reconcileTerminalNotifications` pass that backfills missing notifications
+  for runs whose `meta.json` is terminal but whose journal record was never
+  written (crash gap). Sentinels (`.terminal_notification`,
+  `.fatal_notification`) gate emission; reconciliation also handles the
+  upgrade path where a journal record exists but the sentinel is missing.
+  `ensureReady` is idempotent (`ready` flag short-circuits reentrant calls)
+  so reconciliation cannot recurse through `appendNotification`.
+- **Evidence:**
+  - Tests: `src/__tests__/claudeHarness.test.ts` ("Bash is excluded across
+    the entire supervisor envelope", "rejects --debug-file in both space and
+    equals forms"), `src/__tests__/runStoreTerminalDurability.test.ts`
+    (atomic emission, crash-gap reconciliation, sentinel-without-journal,
+    journal-without-sentinel, no-recursion).
+  - Source: `src/claude/permission.ts`, `src/claude/config.ts`,
+    `src/claude/launcher.ts`, `src/claude/passthrough.ts`,
+    `src/runStore.ts`, `src/notificationPushPoller.ts`.
+  - Docs: README "Claude Code Orchestration Mode" and supervisor wait table,
+    `docs/development/mcp-tooling.md` Claude harness section.

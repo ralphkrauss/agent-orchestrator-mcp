@@ -1,5 +1,5 @@
 import { constants, type Dirent } from 'node:fs';
-import { access, copyFile, mkdir, readdir, rm } from 'node:fs/promises';
+import { access, copyFile, lstat, mkdir, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 export interface ResolvedClaudeSkills {
@@ -44,6 +44,10 @@ export async function listOrchestrationSkills(sourceSkillRoot: string): Promise<
     if (!entry.name.startsWith('orchestrate-')) continue;
     const skillFile = join(sourceSkillRoot, entry.name, 'SKILL.md');
     try {
+      // lstat (not stat) so symlinked SKILL.md never copies host content into
+      // the curated envelope; only real regular files are accepted.
+      const info = await lstat(skillFile);
+      if (!info.isFile() || info.isSymbolicLink()) continue;
       await access(skillFile, constants.R_OK);
       names.push(entry.name);
     } catch (error) {

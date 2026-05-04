@@ -19,7 +19,6 @@ import {
   stringifyClaudeMcpConfig,
 } from './config.js';
 import { discoverClaudeSurface, summarizeReport, type ClaudeSurfaceReport } from './discovery.js';
-import { resolveMonitorPin } from './monitorPin.js';
 import { buildClaudeAllowedToolsList, CLAUDE_SUPERVISOR_BUILTIN_TOOLS, stringifyClaudeSupervisorSettings } from './permission.js';
 import { validateClaudePassthroughArgs } from './passthrough.js';
 import { curateOrchestrateSkills } from './skills.js';
@@ -228,7 +227,7 @@ Options:
 
 Passthrough after --:
   Allowed Claude flags: --print, -p, --output-format, --input-format, --include-partial-messages,
-  --include-hook-events, --verbose, --debug, -d, --debug-file, --name, -n,
+  --include-hook-events, --verbose, --debug, -d, --name, -n,
   --exclude-dynamic-system-prompt-sections, --no-session-persistence.
   Forbidden flags (the harness owns these or they would break isolation):
   --dangerously-skip-permissions, --mcp-config, --strict-mcp-config, --tools,
@@ -246,7 +245,6 @@ Environment fallbacks:
   AGENT_ORCHESTRATOR_CLAUDE_SKILLS_PATH
   AGENT_ORCHESTRATOR_CLAUDE_STATE_DIR
   AGENT_ORCHESTRATOR_CLAUDE_BIN
-  AGENT_ORCHESTRATOR_BIN (override the pinned monitor binary)
 `;
 }
 
@@ -283,17 +281,24 @@ export async function buildClaudeEnvelope(input: {
     sourceSkillRoot: options.skillsPath,
     ephemeralSkillRoot,
   });
-  const monitorPin = resolveMonitorPin(env);
+  let manifestPath = options.manifestPath;
+  if (options.profilesJson) {
+    const inlineManifestPath = join(envelopeDir, 'profiles.json');
+    const inlineContent = options.profilesJson.endsWith('\n')
+      ? options.profilesJson
+      : `${options.profilesJson}\n`;
+    await writeFile(inlineManifestPath, inlineContent, { mode: 0o600 });
+    manifestPath = inlineManifestPath;
+  }
   const config = buildClaudeHarnessConfig({
     targetCwd: options.cwd,
-    manifestPath: options.manifestPath,
+    manifestPath,
     ephemeralSkillRoot: skills.ephemeralRoot,
     orchestrationSkillNames: skills.orchestrationSkillNames,
     catalog,
     profiles: profilesResult.profiles,
     profileDiagnostics: profilesResult.diagnostics,
     mcpCliPath: packageCliPath(),
-    monitorPin,
   });
   const settingsPath = join(envelopeDir, 'settings.json');
   const mcpConfigPath = join(envelopeDir, 'mcp.json');
@@ -310,9 +315,7 @@ export async function buildClaudeEnvelope(input: {
     mcpConfigPath,
     systemPromptPath,
     builtinTools: [...CLAUDE_SUPERVISOR_BUILTIN_TOOLS],
-    allowedTools: buildClaudeAllowedToolsList({
-      monitorBashAllowlistPattern: monitorPin.bash_allowlist_pattern,
-    }),
+    allowedTools: buildClaudeAllowedToolsList(),
     passthrough: options.claudeArgs,
   });
   const spawnEnv: NodeJS.ProcessEnv = {
@@ -361,12 +364,13 @@ export function buildClaudeSpawnArgs(input: {
   //   CLAUDE_CONFIG_DIR points at that HOME's .claude directory. Claude Code's
   //   auth path is HOME/.claude, so this preserves login state across launches
   //   without reading the user's normal ~/.claude.
-  // - --tools restricts built-in tool *availability*. Bash is present only so
-  //   the supervisor can start the pinned monitor command as a background
-  //   task; --allowed-tools and settings.permissions allow exactly that
-  //   Bash(<agent-orchestrator> monitor *) pattern and the orchestrator MCP
-  //   tools. --permission-mode dontAsk denies anything outside the allowlist
-  //   instead of surfacing permission prompts to the supervisor.
+  // - --tools restricts built-in tool *availability* to Read/Glob/Grep.
+  //   Bash is intentionally not part of the surface: a `Bash(<prefix> *)`
+  //   allowlist glob does not constrain shell metacharacters in the suffix.
+  //   The supervisor waits for runs through the agent-orchestrator MCP
+  //   notification surface (`wait_for_any_run` / `list_run_notifications`)
+  //   instead. --permission-mode dontAsk denies anything outside the
+  //   allowlist instead of surfacing permission prompts.
   // - --add-dir is intentionally NOT passed: Claude Code scans add-dir paths
   //   for project skills/commands/agents/hooks and CLAUDE.md, which would
   //   re-introduce target workspace .claude/* leakage. The supervisor reads
@@ -379,7 +383,7 @@ export function buildClaudeSpawnArgs(input: {
     '--setting-sources', '',
     '--append-system-prompt-file', input.systemPromptPath,
     '--tools', input.builtinTools.join(','),
-    '--allowed-tools', input.allowedTools.join(' '),
+    '--allowed-tools', input.allowedTools.join(','),
     '--permission-mode', input.permissionMode ?? 'dontAsk',
     ...input.passthrough,
   ];

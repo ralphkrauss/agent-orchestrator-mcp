@@ -112,6 +112,8 @@ const maxAckCheckBytes = 4 * 1024 * 1024;
 export class RunStore {
   readonly root: string;
   private readonly daemonStartedMs: number;
+  private ready = false;
+  private readyPromise: Promise<void> | null = null;
 
   constructor(root = resolveStoreRoot()) {
     this.root = root;
@@ -119,8 +121,34 @@ export class RunStore {
   }
 
   async ensureReady(): Promise<void> {
-    await ensureSecureRoot(this.root);
-    await mkdir(this.runsRoot(), { recursive: true, mode: rootMode });
+    if (this.ready) return;
+    if (this.readyPromise) return this.readyPromise;
+    this.readyPromise = (async () => {
+      await ensureSecureRoot(this.root);
+      await mkdir(this.runsRoot(), { recursive: true, mode: rootMode });
+      // Mark ready before reconciliation so any reentrant calls into
+      // ensureReady() from inside reconcileTerminalNotifications (e.g. via
+      // appendNotification) short-circuit without recursing.
+      this.ready = true;
+      try {
+        await this.reconcileTerminalNotifications();
+      } catch (error) {
+        // Reconciliation is best-effort across the whole run set; per-run
+        // failures are already swallowed inside the helper. Surface anything
+        // that escapes (e.g. unable to read runs root) but keep the store
+        // usable on retry.
+        this.ready = false;
+        this.readyPromise = null;
+        throw error;
+      }
+    })();
+    try {
+      await this.readyPromise;
+    } finally {
+      // readyPromise can be cleared once it has settled; subsequent calls
+      // short-circuit via the `ready` flag.
+      if (this.ready) this.readyPromise = null;
+    }
   }
 
   runsRoot(): string {
@@ -293,9 +321,14 @@ export class RunStore {
   }> {
     const event_count = await this.getLastSequence(runId, true);
     const recent_events = await this.readRecentEventsFromLog(runId, recentLimit);
+    // Always derive last_event from a dedicated 1-event tail so cursor-mode
+    // callers (recentLimit=0) still see latest_event_sequence/at metadata.
+    const last_event = recent_events.length > 0
+      ? recent_events.at(-1) ?? null
+      : (await this.readRecentEventsFromLog(runId, 1)).at(-1) ?? null;
     return {
       event_count,
-      last_event: recent_events.at(-1) ?? null,
+      last_event,
       recent_events,
     };
   }
@@ -312,8 +345,7 @@ export class RunStore {
       latest_error?: RunLatestError;
     },
   ): Promise<RunMeta> {
-    let notificationInput: AppendNotificationInput | null = null;
-    const updated = await this.withRunLock(runId, async () => {
+    return this.withRunLock(runId, async () => {
       const current = await this.loadMeta(runId);
       if (isTerminalStatus(current.status)) return current;
 
@@ -348,24 +380,135 @@ export class RunStore {
       });
       await appendFile(this.eventsPath(runId), `${JSON.stringify(event)}\n`, { mode: fileMode });
       await writeFile(this.eventSeqPath(runId), `${event.seq}\n`, { mode: fileMode });
-      notificationInput = {
+      // Atomically emit terminal (and fatal_error) notifications inside the
+      // run lock so a crash between the meta/result write and the journal
+      // append cannot leave the run terminal-without-notification.
+      const fatal = next.latest_error;
+      if (fatal && fatal.fatal) {
+        await this.appendFatalErrorNotificationIfNew(runId, next.status, fatal);
+      }
+      await this.appendTerminalNotificationIfNew(runId, {
         run_id: runId,
         kind: 'terminal',
         status: next.status,
         terminal_reason: next.terminal_reason,
         latest_error: next.latest_error,
-      };
+      });
       return next;
     });
-    if (notificationInput) {
-      const input: AppendNotificationInput = notificationInput;
-      const fatal = input.latest_error;
-      if (fatal && fatal.fatal) {
-        await this.appendFatalErrorNotificationIfNew(runId, input.status, fatal);
+  }
+
+  async appendTerminalNotificationIfNew(runId: string, input: AppendNotificationInput): Promise<RunNotification | null> {
+    await this.ensureReady();
+    const sentinelPath = this.terminalNotificationSentinelPath(runId);
+    return this.withNotificationLock(async () => {
+      try {
+        const existing = await stat(sentinelPath);
+        if (existing.isFile()) return null;
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
       }
-      await this.appendNotification(input);
+      const seq = await this.nextNotificationSequence();
+      const notificationId = `${seq.toString().padStart(notificationSeqDigits, '0')}-${ulid()}`;
+      const created = new Date().toISOString();
+      const record: RunNotification = RunNotificationSchema.parse({
+        notification_id: notificationId,
+        seq,
+        run_id: input.run_id,
+        kind: input.kind,
+        status: input.status,
+        terminal_reason: input.terminal_reason ?? null,
+        latest_error: input.latest_error ?? null,
+        created_at: created,
+      });
+      await appendFile(this.notificationsJournalPath(), `${JSON.stringify(record)}\n`, { mode: fileMode });
+      await writeFile(this.notificationsSeqPath(), `${seq}\n`, { mode: fileMode });
+      try {
+        await writeFile(sentinelPath, `${record.notification_id}\n`, { mode: fileMode });
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
+      }
+      return record;
+    });
+  }
+
+  async reconcileTerminalNotifications(): Promise<{ backfilled_terminal: number; backfilled_fatal: number; skipped: number }> {
+    let backfilled_terminal = 0;
+    let backfilled_fatal = 0;
+    let skipped = 0;
+    let dirs: string[];
+    try {
+      dirs = await readdir(this.runsRoot());
+    } catch (error) {
+      if (isNotFound(error)) return { backfilled_terminal, backfilled_fatal, skipped };
+      throw error;
     }
-    return updated;
+
+    for (const runId of dirs) {
+      // Step 1: read run metadata. Corrupt or unreadable per-run state is the
+      // only failure mode we tolerate silently here, because a single bad
+      // run dir must not block the rest of the reconciliation pass.
+      let meta: Awaited<ReturnType<typeof this.loadMeta>>;
+      try {
+        meta = await this.loadMeta(runId);
+      } catch {
+        continue;
+      }
+      if (!isTerminalStatus(meta.status)) {
+        skipped += 1;
+        continue;
+      }
+
+      // Step 2: durable journal work. Failures from notification appends are
+      // load-bearing for the wait-hang fix and must propagate so daemon
+      // startup surfaces a real I/O fault instead of leaving a terminal run
+      // without a durable notification.
+      const terminalSentinel = this.terminalNotificationSentinelPath(runId);
+      if (!(await pathExistsAsFile(terminalSentinel))) {
+        const existing = await this.listNotifications({ runIds: [runId], kinds: ['terminal'], includeAcked: true, limit: 1 });
+        if (existing.length > 0) {
+          try {
+            await writeFile(terminalSentinel, `${existing[0]!.notification_id}\n`, { mode: fileMode });
+          } catch (error) {
+            // ENOENT here means the run dir vanished mid-scan (pruned),
+            // which is benign; anything else propagates.
+            if (!isNotFound(error)) throw error;
+          }
+        } else {
+          const result = await this.appendTerminalNotificationIfNew(runId, {
+            run_id: runId,
+            kind: 'terminal',
+            status: meta.status,
+            terminal_reason: meta.terminal_reason,
+            latest_error: meta.latest_error,
+          });
+          if (result) backfilled_terminal += 1;
+        }
+      }
+
+      if (meta.latest_error && meta.latest_error.fatal) {
+        const fatalSentinel = this.fatalNotificationSentinelPath(runId);
+        if (!(await pathExistsAsFile(fatalSentinel))) {
+          const existing = await this.listNotifications({ runIds: [runId], kinds: ['fatal_error'], includeAcked: true, limit: 1 });
+          if (existing.length > 0) {
+            try {
+              await writeFile(fatalSentinel, `${existing[0]!.notification_id}\n`, { mode: fileMode });
+            } catch (error) {
+              if (!isNotFound(error)) throw error;
+            }
+          } else {
+            const result = await this.appendFatalErrorNotificationIfNew(runId, meta.status, meta.latest_error);
+            if (result) backfilled_fatal += 1;
+          }
+        }
+      }
+    }
+
+    return { backfilled_terminal, backfilled_fatal, skipped };
+  }
+
+  terminalNotificationSentinelPath(runId: string): string {
+    return join(this.runDir(runId), '.terminal_notification');
   }
 
   async appendFatalErrorNotificationIfNew(
@@ -936,6 +1079,16 @@ async function writeAtomicJson(path: string, value: unknown): Promise<void> {
 
 function isNotFound(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
+async function pathExistsAsFile(path: string): Promise<boolean> {
+  try {
+    const info = await stat(path);
+    return info.isFile();
+  } catch (error) {
+    if (isNotFound(error)) return false;
+    throw error;
+  }
 }
 
 function terminalReasonFromStatus(status: TerminalRunStatus): RunTerminalReason {

@@ -10,11 +10,12 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { IpcClient, IpcRequestError } from './ipc/client.js';
 import { daemonPaths } from './daemon/paths.js';
-import { orchestratorError, RunNotificationPushPayloadSchema, RunNotificationSchema, wrapErr } from './contract.js';
+import { orchestratorError, wrapErr } from './contract.js';
 import { checkDaemonVersion } from './daemonVersion.js';
 import { getPackageVersion } from './packageMetadata.js';
 import { ipcTimeoutForTool } from './toolTimeout.js';
 import { tools } from './mcpTools.js';
+import { createNotificationPushTick, parseNotificationPollIntervalMs } from './notificationPushPoller.js';
 
 const paths = daemonPaths();
 const client = new IpcClient(paths.ipc.path);
@@ -110,42 +111,11 @@ await server.connect(transport);
 startNotificationPushPoller();
 
 function startNotificationPushPoller(): void {
-  const intervalMs = Number.parseInt(process.env.AGENT_ORCHESTRATOR_NOTIFICATION_POLL_MS ?? '500', 10) || 500;
-  let lastSeen: string | undefined;
-  let running = false;
-  const tick = async () => {
-    if (running) return;
-    running = true;
-    try {
-      const result = await client.request<{ ok: boolean; notifications?: unknown[] } & Record<string, unknown>>(
-        'list_run_notifications',
-        lastSeen ? { since_notification_id: lastSeen, limit: 50 } : { limit: 50 },
-        1_500,
-      );
-      if (!result.ok || !Array.isArray(result.notifications)) return;
-      for (const raw of result.notifications) {
-        const parsed = RunNotificationSchema.safeParse(raw);
-        if (!parsed.success) continue;
-        const record = parsed.data;
-        if (lastSeen === undefined || record.notification_id > lastSeen) lastSeen = record.notification_id;
-        const payload = RunNotificationPushPayloadSchema.parse({
-          run_id: record.run_id,
-          notification_id: record.notification_id,
-          kind: record.kind,
-          status: record.status,
-        });
-        try {
-          await server.notification({ method: 'notifications/run/changed', params: payload });
-        } catch {
-          // Push is advisory; durable journal remains authoritative.
-        }
-      }
-    } catch {
-      // Tolerate transient IPC errors; durable journal remains authoritative.
-    } finally {
-      running = false;
-    }
-  };
+  const intervalMs = parseNotificationPollIntervalMs(process.env.AGENT_ORCHESTRATOR_NOTIFICATION_POLL_MS);
+  const tick = createNotificationPushTick({
+    request: (method, params, timeoutMs) => client.request(method, params, timeoutMs),
+    notify: (params) => server.notification({ method: 'notifications/run/changed', params: params as Record<string, unknown> }),
+  });
   const timer = setInterval(() => { void tick(); }, intervalMs);
   if (typeof timer.unref === 'function') timer.unref();
 }
