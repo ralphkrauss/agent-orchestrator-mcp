@@ -110,6 +110,7 @@ export class ProcessManager {
 
     let resultEvent: BackendResultEvent | null = null;
     let sessionId: string | undefined;
+    let lastAssistantMessage: string | undefined;
     const filesFromEvents = new Set<string>();
     const commandsRun: string[] = [];
     const observedErrors: RunError[] = [];
@@ -149,6 +150,7 @@ export class ProcessManager {
       parseTasks.push(this.handleJsonLine(runId, backend, line, {
         setSessionId: (id) => { sessionId = id; },
         setResultEvent: (event) => { resultEvent = event; },
+        setLastAssistantMessage: (text) => { lastAssistantMessage = text; },
         addFile: (path) => filesFromEvents.add(path),
         addCommand: (command) => commandsRun.push(command),
         addError: (error) => recordObservedError(error),
@@ -209,6 +211,7 @@ export class ProcessManager {
               signal,
               resultEvent,
               sessionId,
+              lastAssistantMessage,
               Array.from(filesFromEvents),
               commandsRun,
               observedErrors,
@@ -232,6 +235,7 @@ export class ProcessManager {
     sinks: {
       setSessionId(id: string): void;
       setResultEvent(event: BackendResultEvent): void;
+      setLastAssistantMessage(text: string): void;
       addFile(path: string): void;
       addCommand(command: string): void;
       addError(error: RunError): void;
@@ -268,6 +272,10 @@ export class ProcessManager {
     for (const command of parsed.commandsRun) sinks.addCommand(command);
     for (const error of parsed.errors) sinks.addError(error);
     for (const event of parsed.events) {
+      if (event.type === 'assistant_message') {
+        const text = assistantMessageText(event.payload);
+        if (text) sinks.setLastAssistantMessage(text);
+      }
       await this.store.appendEvent(runId, event);
     }
   }
@@ -306,6 +314,7 @@ export class ProcessManager {
     signal: NodeJS.Signals | null,
     resultEvent: BackendResultEvent | null,
     sessionId: string | undefined,
+    lastAssistantMessage: string | undefined,
     filesFromEvents: string[],
     commandsRun: string[],
     observedErrors: RunError[],
@@ -331,6 +340,7 @@ export class ProcessManager {
       exitCode,
       signal,
       resultEvent,
+      lastAssistantMessage,
       filesChangedFromEvents: normalizedFilesFromEvents,
       filesChangedFromGit: filesFromGit,
       commandsRun,
@@ -376,6 +386,11 @@ export class ProcessManager {
         : undefined;
     return this.store.markTerminal(runId, runStatus, finalized.result.errors, finalized.result, terminalDetails);
   }
+}
+
+function assistantMessageText(payload: Record<string, unknown>): string | null {
+  const text = payload.text;
+  return typeof text === 'string' && text.trim() ? text : null;
 }
 
 function terminalOverrideMessage(

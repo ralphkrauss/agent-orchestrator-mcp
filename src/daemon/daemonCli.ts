@@ -87,7 +87,7 @@ function pruneUsage(): string {
 
 async function start(): Promise<void> {
   if (await ping()) {
-    process.stdout.write('agent-orchestrator daemon is already running\n');
+    process.stdout.write(`agent-orchestrator daemon is already running store=${paths.home}\n`);
     return;
   }
 
@@ -99,7 +99,7 @@ async function start(): Promise<void> {
   });
   child.unref();
   await waitForDaemon(2_000);
-  process.stdout.write(`agent-orchestrator daemon started pid=${await readPid() ?? 'unknown'}\n`);
+  process.stdout.write(`agent-orchestrator daemon started pid=${await readPid() ?? 'unknown'} store=${paths.home}\n`);
 }
 
 async function stop(force: boolean): Promise<void> {
@@ -111,7 +111,7 @@ async function stop(force: boolean): Promise<void> {
       process.stderr.write(`daemon refused to stop; active runs: ${activeRuns}\n`);
       process.exit(2);
     }
-    process.stdout.write('agent-orchestrator daemon stopping\n');
+    process.stdout.write(`agent-orchestrator daemon stopping store=${paths.home}\n`);
   } catch (error) {
     const message = error instanceof IpcRequestError ? error.orchestratorError.message : error instanceof Error ? error.message : String(error);
     process.stderr.write(`failed to stop daemon: ${message}\n`);
@@ -124,7 +124,7 @@ async function restart(force: boolean): Promise<void> {
     await stop(force);
     await waitForStopped(5_000);
   } else {
-    process.stdout.write('agent-orchestrator daemon is stopped\n');
+    process.stdout.write(`agent-orchestrator daemon is stopped store=${paths.home}\n`);
   }
   await start();
 }
@@ -157,9 +157,9 @@ async function status(argv: readonly string[]): Promise<void> {
     const daemonVersion = typeof pingResult.daemon_version === 'string' ? pingResult.daemon_version : null;
     const frontendVersion = getPackageVersion();
     const versionMatch = daemonVersion === frontendVersion;
-    process.stdout.write(`running pid=${pingResult.daemon_pid} daemon_version=${daemonVersion ?? 'unknown'} frontend_version=${frontendVersion} version_match=${versionMatch} runs=${runs}\n`);
+    process.stdout.write(`running pid=${pingResult.daemon_pid} store=${paths.home} daemon_version=${daemonVersion ?? 'unknown'} frontend_version=${frontendVersion} version_match=${versionMatch} runs=${runs}\n`);
   } catch {
-    process.stdout.write('stopped\n');
+    process.stdout.write(`stopped store=${paths.home}\n`);
     process.exitCode = 1;
   }
 }

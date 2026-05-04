@@ -7,8 +7,9 @@ import { getBackendStatus } from '../diagnostics.js';
 import { defaultWorkerProfilesFile } from '../workerRouting.js';
 import {
   createWorkerCapabilityCatalog,
+  inspectWorkerProfiles,
   parseWorkerProfileManifest,
-  validateWorkerProfiles,
+  type InspectedWorkerProfiles,
   type ValidatedWorkerProfiles,
 } from './capabilities.js';
 import { OPENCODE_ORCHESTRATOR_AGENT, buildOpenCodeHarnessConfig, stringifyOpenCodeConfig } from './config.js';
@@ -240,12 +241,26 @@ async function loadProfilesForLaunch(
   }
 
   const parsed = parseWorkerProfileManifest(raw.value);
-  if (!parsed.ok) return { ok: true, profiles: undefined, diagnostics: parsed.errors };
-  const validated = validateWorkerProfiles(parsed.value, catalog);
-  if (!validated.ok) {
-    return { ok: true, profiles: undefined, diagnostics: validated.errors };
+  if (!parsed.ok) {
+    // Explicit inline manifests must fail fast on validation errors so the
+    // operator notices the bad manifest immediately, matching the syntax-error
+    // behavior. File-backed manifests stay diagnostics-only.
+    if (options.profilesJson) return { ok: false, errors: parsed.errors };
+    return { ok: true, profiles: undefined, diagnostics: parsed.errors };
   }
-  return { ok: true, profiles: validated.value, diagnostics: [] };
+  const inspected = inspectWorkerProfiles(parsed.value, catalog);
+  return {
+    ok: true,
+    profiles: validatedSubset(inspected),
+    diagnostics: inspected.errors,
+  };
+}
+
+function validatedSubset(inspected: InspectedWorkerProfiles): ValidatedWorkerProfiles {
+  return {
+    manifest: inspected.manifest,
+    profiles: inspected.profiles,
+  };
 }
 
 async function loadManifestInput(
