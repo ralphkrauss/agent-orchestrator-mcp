@@ -54,12 +54,22 @@
     "ulid": "^2.4.0",
     "zod": "^3.25.76"
   },
+  "optionalDependencies": {
+    "@cursor/sdk": "^1.0.12"
+  },
   "devDependencies": {
     "@types/node": "^22.15.18",
     "typescript": "^5.9.3"
   },
   "overrides": {
     "path-to-regexp": ">=8.4.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "tar": "^7.5.11",
+      "undici": "^6.24.0",
+      "@tootallnate/once": "^3.0.1"
+    }
   },
   "packageManager": "pnpm@10.30.3"
 }

@@ -523,7 +523,7 @@ describe('agent orchestrator integration with mock CLIs', () => {
     await store.updateMeta(running.run_id, (meta) => ({ ...meta, started_at: new Date().toISOString(), worker_pid: 12345, daemon_pid_at_spawn: 99999 }));
     await writeFile(join(store.runDir(running.run_id), '.lock'), `${JSON.stringify({ pid: 999_999_999, acquired_at: new Date(0).toISOString() })}\n`);
     const logMessages: string[] = [];
-    const restarted = new OrchestratorService(store, createBackendRegistry(), (message) => logMessages.push(message));
+    const restarted = new OrchestratorService(store, createBackendRegistry(store), (message) => logMessages.push(message));
     await restarted.initialize();
     const swept = await store.loadRun(running.run_id);
     assert.equal(swept?.meta.status, 'orphaned');
@@ -544,7 +544,8 @@ async function createFixture(): Promise<{ root: string; home: string }> {
 }
 
 async function createService(home: string): Promise<OrchestratorService> {
-  const service = new OrchestratorService(new RunStore(home), createBackendRegistry());
+  const store = new RunStore(home);
+  const service = new OrchestratorService(store, createBackendRegistry(store));
   await service.initialize();
   return service;
 }
