@@ -15,6 +15,7 @@ import { checkDaemonVersion } from './daemonVersion.js';
 import { getPackageVersion } from './packageMetadata.js';
 import { ipcTimeoutForTool } from './toolTimeout.js';
 import { tools } from './mcpTools.js';
+import { createNotificationPushTick, parseNotificationPollIntervalMs } from './notificationPushPoller.js';
 
 const paths = daemonPaths();
 const client = new IpcClient(paths.ipc.path);
@@ -107,3 +108,14 @@ process.on('SIGTERM', () => process.exit(0));
 const transport = new StdioServerTransport();
 await ensureDaemon({ allowVersionMismatch: true });
 await server.connect(transport);
+startNotificationPushPoller();
+
+function startNotificationPushPoller(): void {
+  const intervalMs = parseNotificationPollIntervalMs(process.env.AGENT_ORCHESTRATOR_NOTIFICATION_POLL_MS);
+  const tick = createNotificationPushTick({
+    request: (method, params, timeoutMs) => client.request(method, params, timeoutMs),
+    notify: (params) => server.notification({ method: 'notifications/run/changed', params: params as Record<string, unknown> }),
+  });
+  const timer = setInterval(() => { void tick(); }, intervalMs);
+  if (typeof timer.unref === 'function') timer.unref();
+}

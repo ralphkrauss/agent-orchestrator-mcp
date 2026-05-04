@@ -98,6 +98,12 @@ describe('RunStore', () => {
     assert.equal(summary.last_event?.seq, 150);
     assert.deepStrictEqual(summary.recent_events.map((event) => event.seq), [146, 147, 148, 149, 150]);
 
+    const cursorSummary = await store.readEventSummary(run.run_id, 0);
+    assert.equal(cursorSummary.event_count, 150);
+    assert.equal(cursorSummary.recent_events.length, 0);
+    assert.equal(cursorSummary.last_event?.seq, 150, 'last_event must be derived independently of recentLimit');
+    assert.match(cursorSummary.last_event?.ts ?? '', /\d{4}-\d{2}-\d{2}T/);
+
     const largeRun = await store.createRun({ backend: 'codex', cwd: root });
     await store.appendEvent(largeRun.run_id, { type: 'assistant_message', payload: { text: 'x'.repeat(80_000) } });
     for (let index = 0; index < 20; index += 1) {

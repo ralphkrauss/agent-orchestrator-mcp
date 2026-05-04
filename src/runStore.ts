@@ -11,6 +11,9 @@ import {
   isTerminalStatus,
   type RunActivitySource,
   type RunLatestError,
+  type RunNotification,
+  type RunNotificationKind,
+  RunNotificationSchema,
   type RunTerminalReason,
   type RunTimeoutReason,
   type ModelSource,
@@ -81,11 +84,36 @@ export interface PruneRunsResult {
   cutoff: string;
   matched: PrunedRun[];
   deleted_run_ids: string[];
+  pruned_notifications?: number;
 }
+
+export interface AppendNotificationInput {
+  run_id: string;
+  kind: RunNotificationKind;
+  status: RunStatus;
+  terminal_reason?: RunTerminalReason | string | null;
+  latest_error?: RunLatestError;
+}
+
+export interface ListNotificationsOptions {
+  runIds?: readonly string[];
+  sinceNotificationId?: string;
+  kinds?: readonly RunNotificationKind[];
+  includeAcked?: boolean;
+  limit?: number;
+}
+
+const notificationSeqFile = 'notifications.seq';
+const notificationJournalFile = 'notifications.jsonl';
+const notificationAcksFile = 'acks.jsonl';
+const notificationSeqDigits = 20;
+const maxAckCheckBytes = 4 * 1024 * 1024;
 
 export class RunStore {
   readonly root: string;
   private readonly daemonStartedMs: number;
+  private ready = false;
+  private readyPromise: Promise<void> | null = null;
 
   constructor(root = resolveStoreRoot()) {
     this.root = root;
@@ -93,8 +121,34 @@ export class RunStore {
   }
 
   async ensureReady(): Promise<void> {
-    await ensureSecureRoot(this.root);
-    await mkdir(this.runsRoot(), { recursive: true, mode: rootMode });
+    if (this.ready) return;
+    if (this.readyPromise) return this.readyPromise;
+    this.readyPromise = (async () => {
+      await ensureSecureRoot(this.root);
+      await mkdir(this.runsRoot(), { recursive: true, mode: rootMode });
+      // Mark ready before reconciliation so any reentrant calls into
+      // ensureReady() from inside reconcileTerminalNotifications (e.g. via
+      // appendNotification) short-circuit without recursing.
+      this.ready = true;
+      try {
+        await this.reconcileTerminalNotifications();
+      } catch (error) {
+        // Reconciliation is best-effort across the whole run set; per-run
+        // failures are already swallowed inside the helper. Surface anything
+        // that escapes (e.g. unable to read runs root) but keep the store
+        // usable on retry.
+        this.ready = false;
+        this.readyPromise = null;
+        throw error;
+      }
+    })();
+    try {
+      await this.readyPromise;
+    } finally {
+      // readyPromise can be cleared once it has settled; subsequent calls
+      // short-circuit via the `ready` flag.
+      if (this.ready) this.readyPromise = null;
+    }
   }
 
   runsRoot(): string {
@@ -267,9 +321,14 @@ export class RunStore {
   }> {
     const event_count = await this.getLastSequence(runId, true);
     const recent_events = await this.readRecentEventsFromLog(runId, recentLimit);
+    // Always derive last_event from a dedicated 1-event tail so cursor-mode
+    // callers (recentLimit=0) still see latest_event_sequence/at metadata.
+    const last_event = recent_events.length > 0
+      ? recent_events.at(-1) ?? null
+      : (await this.readRecentEventsFromLog(runId, 1)).at(-1) ?? null;
     return {
       event_count,
-      last_event: recent_events.at(-1) ?? null,
+      last_event,
       recent_events,
     };
   }
@@ -321,8 +380,177 @@ export class RunStore {
       });
       await appendFile(this.eventsPath(runId), `${JSON.stringify(event)}\n`, { mode: fileMode });
       await writeFile(this.eventSeqPath(runId), `${event.seq}\n`, { mode: fileMode });
+      // Atomically emit terminal (and fatal_error) notifications inside the
+      // run lock so a crash between the meta/result write and the journal
+      // append cannot leave the run terminal-without-notification.
+      const fatal = next.latest_error;
+      if (fatal && fatal.fatal) {
+        await this.appendFatalErrorNotificationIfNew(runId, next.status, fatal);
+      }
+      await this.appendTerminalNotificationIfNew(runId, {
+        run_id: runId,
+        kind: 'terminal',
+        status: next.status,
+        terminal_reason: next.terminal_reason,
+        latest_error: next.latest_error,
+      });
       return next;
     });
+  }
+
+  async appendTerminalNotificationIfNew(runId: string, input: AppendNotificationInput): Promise<RunNotification | null> {
+    await this.ensureReady();
+    const sentinelPath = this.terminalNotificationSentinelPath(runId);
+    return this.withNotificationLock(async () => {
+      try {
+        const existing = await stat(sentinelPath);
+        if (existing.isFile()) return null;
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
+      }
+      const seq = await this.nextNotificationSequence();
+      const notificationId = `${seq.toString().padStart(notificationSeqDigits, '0')}-${ulid()}`;
+      const created = new Date().toISOString();
+      const record: RunNotification = RunNotificationSchema.parse({
+        notification_id: notificationId,
+        seq,
+        run_id: input.run_id,
+        kind: input.kind,
+        status: input.status,
+        terminal_reason: input.terminal_reason ?? null,
+        latest_error: input.latest_error ?? null,
+        created_at: created,
+      });
+      await appendFile(this.notificationsJournalPath(), `${JSON.stringify(record)}\n`, { mode: fileMode });
+      await writeFile(this.notificationsSeqPath(), `${seq}\n`, { mode: fileMode });
+      try {
+        await writeFile(sentinelPath, `${record.notification_id}\n`, { mode: fileMode });
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
+      }
+      return record;
+    });
+  }
+
+  async reconcileTerminalNotifications(): Promise<{ backfilled_terminal: number; backfilled_fatal: number; skipped: number }> {
+    let backfilled_terminal = 0;
+    let backfilled_fatal = 0;
+    let skipped = 0;
+    let dirs: string[];
+    try {
+      dirs = await readdir(this.runsRoot());
+    } catch (error) {
+      if (isNotFound(error)) return { backfilled_terminal, backfilled_fatal, skipped };
+      throw error;
+    }
+
+    for (const runId of dirs) {
+      // Step 1: read run metadata. Corrupt or unreadable per-run state is the
+      // only failure mode we tolerate silently here, because a single bad
+      // run dir must not block the rest of the reconciliation pass.
+      let meta: Awaited<ReturnType<typeof this.loadMeta>>;
+      try {
+        meta = await this.loadMeta(runId);
+      } catch {
+        continue;
+      }
+      if (!isTerminalStatus(meta.status)) {
+        skipped += 1;
+        continue;
+      }
+
+      // Step 2: durable journal work. Failures from notification appends are
+      // load-bearing for the wait-hang fix and must propagate so daemon
+      // startup surfaces a real I/O fault instead of leaving a terminal run
+      // without a durable notification.
+      const terminalSentinel = this.terminalNotificationSentinelPath(runId);
+      if (!(await pathExistsAsFile(terminalSentinel))) {
+        const existing = await this.listNotifications({ runIds: [runId], kinds: ['terminal'], includeAcked: true, limit: 1 });
+        if (existing.length > 0) {
+          try {
+            await writeFile(terminalSentinel, `${existing[0]!.notification_id}\n`, { mode: fileMode });
+          } catch (error) {
+            // ENOENT here means the run dir vanished mid-scan (pruned),
+            // which is benign; anything else propagates.
+            if (!isNotFound(error)) throw error;
+          }
+        } else {
+          const result = await this.appendTerminalNotificationIfNew(runId, {
+            run_id: runId,
+            kind: 'terminal',
+            status: meta.status,
+            terminal_reason: meta.terminal_reason,
+            latest_error: meta.latest_error,
+          });
+          if (result) backfilled_terminal += 1;
+        }
+      }
+
+      if (meta.latest_error && meta.latest_error.fatal) {
+        const fatalSentinel = this.fatalNotificationSentinelPath(runId);
+        if (!(await pathExistsAsFile(fatalSentinel))) {
+          const existing = await this.listNotifications({ runIds: [runId], kinds: ['fatal_error'], includeAcked: true, limit: 1 });
+          if (existing.length > 0) {
+            try {
+              await writeFile(fatalSentinel, `${existing[0]!.notification_id}\n`, { mode: fileMode });
+            } catch (error) {
+              if (!isNotFound(error)) throw error;
+            }
+          } else {
+            const result = await this.appendFatalErrorNotificationIfNew(runId, meta.status, meta.latest_error);
+            if (result) backfilled_fatal += 1;
+          }
+        }
+      }
+    }
+
+    return { backfilled_terminal, backfilled_fatal, skipped };
+  }
+
+  terminalNotificationSentinelPath(runId: string): string {
+    return join(this.runDir(runId), '.terminal_notification');
+  }
+
+  async appendFatalErrorNotificationIfNew(
+    runId: string,
+    status: RunStatus,
+    latestError: NonNullable<RunLatestError>,
+  ): Promise<RunNotification | null> {
+    await this.ensureReady();
+    const sentinelPath = this.fatalNotificationSentinelPath(runId);
+    return this.withNotificationLock(async () => {
+      try {
+        const existing = await stat(sentinelPath);
+        if (existing.isFile()) return null;
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
+      }
+      const seq = await this.nextNotificationSequence();
+      const notificationId = `${seq.toString().padStart(notificationSeqDigits, '0')}-${ulid()}`;
+      const created = new Date().toISOString();
+      const record: RunNotification = RunNotificationSchema.parse({
+        notification_id: notificationId,
+        seq,
+        run_id: runId,
+        kind: 'fatal_error',
+        status,
+        terminal_reason: null,
+        latest_error: latestError,
+        created_at: created,
+      });
+      await appendFile(this.notificationsJournalPath(), `${JSON.stringify(record)}\n`, { mode: fileMode });
+      await writeFile(this.notificationsSeqPath(), `${seq}\n`, { mode: fileMode });
+      try {
+        await writeFile(sentinelPath, `${record.notification_id}\n`, { mode: fileMode });
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
+      }
+      return record;
+    });
+  }
+
+  fatalNotificationSentinelPath(runId: string): string {
+    return join(this.runDir(runId), '.fatal_notification');
   }
 
   defaultArtifacts(runId: string): { name: string; path: string }[] {
@@ -361,6 +589,273 @@ export class RunStore {
 
   stderrPath(runId: string): string {
     return join(this.runDir(runId), 'stderr.log');
+  }
+
+  notificationsJournalPath(): string {
+    return join(this.root, notificationJournalFile);
+  }
+
+  notificationsAcksPath(): string {
+    return join(this.root, notificationAcksFile);
+  }
+
+  notificationsSeqPath(): string {
+    return join(this.root, notificationSeqFile);
+  }
+
+  private notificationsLockPath(): string {
+    return join(this.root, '.notifications.lock');
+  }
+
+  async appendNotification(input: AppendNotificationInput): Promise<RunNotification> {
+    await this.ensureReady();
+    return this.withNotificationLock(async () => {
+      const seq = await this.nextNotificationSequence();
+      const notificationId = `${seq.toString().padStart(notificationSeqDigits, '0')}-${ulid()}`;
+      const created = new Date().toISOString();
+      const record: RunNotification = RunNotificationSchema.parse({
+        notification_id: notificationId,
+        seq,
+        run_id: input.run_id,
+        kind: input.kind,
+        status: input.status,
+        terminal_reason: input.terminal_reason ?? null,
+        latest_error: input.latest_error ?? null,
+        created_at: created,
+      });
+      await appendFile(this.notificationsJournalPath(), `${JSON.stringify(record)}\n`, { mode: fileMode });
+      await writeFile(this.notificationsSeqPath(), `${seq}\n`, { mode: fileMode });
+      return record;
+    });
+  }
+
+  async listNotifications(options: ListNotificationsOptions = {}): Promise<RunNotification[]> {
+    const limit = options.limit ?? 100;
+    const runFilter = options.runIds && options.runIds.length > 0 ? new Set(options.runIds) : null;
+    const kindFilter = options.kinds && options.kinds.length > 0 ? new Set(options.kinds) : null;
+    const ackedIds = options.includeAcked ? null : await this.readAckedNotificationIds();
+
+    let records: RunNotification[];
+    try {
+      const text = await readFile(this.notificationsJournalPath(), 'utf8');
+      records = text
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => safeParseNotification(line))
+        .filter((record): record is RunNotification => record !== null);
+    } catch (error) {
+      if (isNotFound(error)) return [];
+      throw error;
+    }
+
+    const matched: RunNotification[] = [];
+    for (const record of records) {
+      if (options.sinceNotificationId && record.notification_id <= options.sinceNotificationId) continue;
+      if (runFilter && !runFilter.has(record.run_id)) continue;
+      if (kindFilter && !kindFilter.has(record.kind)) continue;
+      if (ackedIds && ackedIds.has(record.notification_id)) continue;
+      matched.push(record);
+      if (matched.length >= limit) break;
+    }
+    return matched;
+  }
+
+  async markNotificationAcked(notificationId: string): Promise<{ acked: boolean; acked_at: string }> {
+    await this.ensureReady();
+    return this.withNotificationLock(async () => {
+      const acked = await this.readAckedNotificationIds();
+      if (acked.has(notificationId)) {
+        return { acked: false, acked_at: '' };
+      }
+      const now = new Date().toISOString();
+      await appendFile(
+        this.notificationsAcksPath(),
+        `${JSON.stringify({ notification_id: notificationId, acked_at: now })}\n`,
+        { mode: fileMode },
+      );
+      return { acked: true, acked_at: now };
+    });
+  }
+
+  async pruneNotificationsForRuns(runIds: readonly string[]): Promise<number> {
+    if (runIds.length === 0) return 0;
+    await this.ensureReady();
+    return this.withNotificationLock(async () => {
+      const target = new Set(runIds);
+      const removedNotificationIds = new Set<string>();
+      try {
+        const text = await readFile(this.notificationsJournalPath(), 'utf8');
+        const lines = text.split('\n');
+        const kept: string[] = [];
+        for (const line of lines) {
+          if (!line) continue;
+          const record = safeParseNotification(line);
+          if (record && target.has(record.run_id)) {
+            removedNotificationIds.add(record.notification_id);
+            continue;
+          }
+          kept.push(line);
+        }
+        const next = kept.length > 0 ? `${kept.join('\n')}\n` : '';
+        await writeFile(this.notificationsJournalPath(), next, { mode: fileMode });
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
+      }
+
+      if (removedNotificationIds.size > 0) {
+        try {
+          const text = await readFile(this.notificationsAcksPath(), 'utf8');
+          const kept: string[] = [];
+          for (const line of text.split('\n')) {
+            if (!line) continue;
+            let parsed: { notification_id?: unknown } | null = null;
+            try {
+              parsed = JSON.parse(line) as { notification_id?: unknown };
+            } catch {
+              continue;
+            }
+            if (typeof parsed.notification_id === 'string' && removedNotificationIds.has(parsed.notification_id)) continue;
+            kept.push(line);
+          }
+          const next = kept.length > 0 ? `${kept.join('\n')}\n` : '';
+          await writeFile(this.notificationsAcksPath(), next, { mode: fileMode });
+        } catch (error) {
+          if (!isNotFound(error)) throw error;
+        }
+      }
+
+      return removedNotificationIds.size;
+    });
+  }
+
+  private async readAckedNotificationIds(): Promise<Set<string>> {
+    const set = new Set<string>();
+    try {
+      const info = await stat(this.notificationsAcksPath());
+      if (info.size === 0) return set;
+      const text = info.size > maxAckCheckBytes
+        ? await readFile(this.notificationsAcksPath(), 'utf8')
+        : await readFile(this.notificationsAcksPath(), 'utf8');
+      for (const line of text.split('\n')) {
+        if (!line) continue;
+        try {
+          const parsed = JSON.parse(line) as { notification_id?: unknown };
+          if (typeof parsed.notification_id === 'string') set.add(parsed.notification_id);
+        } catch {
+          // Skip corrupt lines.
+        }
+      }
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+    }
+    return set;
+  }
+
+  private async nextNotificationSequence(): Promise<number> {
+    const [seqFromCounter, seqFromJournal] = await Promise.all([
+      this.readPersistedNotificationSeq(),
+      this.readNotificationSeqFromJournal(),
+    ]);
+    const counter = seqFromCounter ?? 0;
+    return Math.max(counter, seqFromJournal) + 1;
+  }
+
+  private async readPersistedNotificationSeq(): Promise<number | null> {
+    try {
+      const text = (await readFile(this.notificationsSeqPath(), 'utf8')).trim();
+      const value = Number.parseInt(text, 10);
+      if (Number.isInteger(value) && value >= 0) return value;
+      return null;
+    } catch (error) {
+      if (isNotFound(error)) return null;
+      return null;
+    }
+  }
+
+  private async readNotificationSeqFromJournal(): Promise<number> {
+    const path = this.notificationsJournalPath();
+    let info: Awaited<ReturnType<typeof stat>>;
+    try {
+      info = await stat(path);
+    } catch (error) {
+      if (isNotFound(error)) return 0;
+      throw error;
+    }
+    if (info.size === 0) return 0;
+
+    let bytesToRead = Math.min(info.size, 64 * 1024);
+    while (true) {
+      const handle = await open(path, 'r');
+      try {
+        const buffer = Buffer.alloc(bytesToRead);
+        await handle.read(buffer, 0, bytesToRead, info.size - bytesToRead);
+        const text = buffer.toString('utf8');
+        const lines = text.split('\n').filter(Boolean);
+        const hasFileStart = bytesToRead === info.size;
+        const candidates = hasFileStart ? lines : lines.slice(1);
+        for (let index = candidates.length - 1; index >= 0; index -= 1) {
+          const record = safeParseNotification(candidates[index]!);
+          if (record) return record.seq;
+        }
+        if (hasFileStart) return 0;
+      } finally {
+        await handle.close();
+      }
+      const nextBytes = Math.min(info.size, bytesToRead * 2);
+      if (nextBytes === bytesToRead) {
+        const text = await readFile(path, 'utf8');
+        let highest = 0;
+        for (const line of text.split('\n')) {
+          if (!line) continue;
+          const record = safeParseNotification(line);
+          if (record && record.seq > highest) highest = record.seq;
+        }
+        return highest;
+      }
+      bytesToRead = nextBytes;
+    }
+  }
+
+  private async withNotificationLock<T>(action: () => Promise<T>): Promise<T> {
+    const lockPath = this.notificationsLockPath();
+    await mkdir(dirname(lockPath), { recursive: true, mode: rootMode });
+    for (let attempt = 0; attempt < maxLockAttempts; attempt += 1) {
+      let handle: Awaited<ReturnType<typeof open>> | null = null;
+      try {
+        handle = await open(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR, fileMode);
+        const metadata: LockMetadata = { pid: process.pid, acquired_at: new Date().toISOString() };
+        await handle.writeFile(`${JSON.stringify(metadata)}\n`);
+        return await action();
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        await this.breakStaleNotificationLock(lockPath);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      } finally {
+        if (handle) {
+          await handle.close();
+          await rm(lockPath, { force: true });
+        }
+      }
+    }
+    throw new Error('Timed out waiting for notifications lock');
+  }
+
+  private async breakStaleNotificationLock(lockPath: string): Promise<void> {
+    let info: Awaited<ReturnType<typeof stat>>;
+    try {
+      info = await stat(lockPath);
+    } catch (error) {
+      if (isNotFound(error)) return;
+      throw error;
+    }
+    if (info.mtimeMs <= this.daemonStartedMs) {
+      await rm(lockPath, { force: true });
+      return;
+    }
+    const ownerPid = await readLockOwnerPid(lockPath);
+    if (ownerPid !== null && !isPidAlive(ownerPid)) {
+      await rm(lockPath, { force: true });
+    }
   }
 
   private lockPath(runId: string): string {
@@ -417,14 +912,18 @@ export class RunStore {
     }
 
     const deleted_run_ids: string[] = [];
+    let pruned_notifications = 0;
     if (!dryRun) {
       for (const run of matched) {
         await rm(this.runDir(run.run_id), { recursive: true, force: true });
         deleted_run_ids.push(run.run_id);
       }
+      if (deleted_run_ids.length > 0) {
+        pruned_notifications = await this.pruneNotificationsForRuns(deleted_run_ids);
+      }
     }
 
-    return { dry_run: dryRun, cutoff, matched, deleted_run_ids };
+    return { dry_run: dryRun, cutoff, matched, deleted_run_ids, pruned_notifications };
   }
 
   private async readEventsPage(runId: string, afterSequence: number, limit: number): Promise<ReadEventsResult> {
@@ -582,6 +1081,16 @@ function isNotFound(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
 }
 
+async function pathExistsAsFile(path: string): Promise<boolean> {
+  try {
+    const info = await stat(path);
+    return info.isFile();
+  } catch (error) {
+    if (isNotFound(error)) return false;
+    throw error;
+  }
+}
+
 function terminalReasonFromStatus(status: TerminalRunStatus): RunTerminalReason {
   if (status === 'completed') return 'completed';
   if (status === 'cancelled') return 'cancelled';
@@ -605,6 +1114,14 @@ function isPidAlive(pid: number): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+function safeParseNotification(line: string): RunNotification | null {
+  try {
+    return RunNotificationSchema.parse(JSON.parse(line));
+  } catch {
+    return null;
   }
 }
 

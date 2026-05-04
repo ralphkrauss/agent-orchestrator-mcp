@@ -92,6 +92,29 @@ export const tools = [
     },
   },
   {
+    name: 'get_run_progress',
+    description: 'Get a compact, bounded progress summary for a run. Prefer this for user-facing progress checks instead of reading raw event pages or parsing client tool-result files.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        run_id: { type: 'string' },
+        after_sequence: {
+          type: 'number',
+          description: 'Optional event cursor. When omitted, returns a compact tail of recent events.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum recent events to summarize. Defaults to 5 and is capped at 20.',
+        },
+        max_text_chars: {
+          type: 'number',
+          description: 'Maximum characters returned for any extracted text snippet. Defaults to 1200.',
+        },
+      },
+      required: ['run_id'],
+    },
+  },
+  {
     name: 'wait_for_run',
     description: 'Wait for a run to reach a terminal status, bounded by wait_seconds.',
     inputSchema: {
@@ -101,6 +124,56 @@ export const tools = [
         wait_seconds: { type: 'number' },
       },
       required: ['run_id', 'wait_seconds'],
+    },
+  },
+  {
+    name: 'wait_for_any_run',
+    description: 'Block until any of the listed run_ids has a new terminal or fatal_error notification, bounded by wait_seconds (1-300). Push notifications/run/changed are advisory hints; durable notification records remain the authoritative source.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        run_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Run ids to subscribe to. At least one, at most 64.',
+        },
+        wait_seconds: { type: 'number', description: 'Maximum block duration in seconds (1-300).' },
+        after_notification_id: {
+          type: 'string',
+          description: 'Cursor: only return notifications strictly greater than this id.',
+        },
+        kinds: {
+          type: 'array',
+          items: { type: 'string', enum: ['terminal', 'fatal_error'] },
+          description: 'Optional notification kinds filter. Defaults to both terminal and fatal_error.',
+        },
+      },
+      required: ['run_ids', 'wait_seconds'],
+    },
+  },
+  {
+    name: 'list_run_notifications',
+    description: 'List durable run notifications since an optional cursor. Use to reconcile run state after disconnect or after a wait_for_any_run.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        run_ids: { type: 'array', items: { type: 'string' } },
+        since_notification_id: { type: 'string' },
+        kinds: { type: 'array', items: { type: 'string', enum: ['terminal', 'fatal_error'] } },
+        include_acked: { type: 'boolean' },
+        limit: { type: 'number' },
+      },
+    },
+  },
+  {
+    name: 'ack_run_notification',
+    description: 'Mark a notification as acknowledged. Idempotent; the original notification record is not mutated.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        notification_id: { type: 'string' },
+      },
+      required: ['notification_id'],
     },
   },
   {

@@ -103,15 +103,20 @@ GitHub replies. The resolution map drives implementation and final replies.
    feedback to the existing implementer session. Then send the implementer's
    response back to the existing code-review session. Continue until both align.
 9. **Final human-decision checkpoint.** Before commit/push, present a final
-   **Open Human Decisions** section. If there are no remaining decisions, say
-   `Open Human Decisions: none.` Do not hide release, dependency, external-write,
-   or behavior-changing decisions under residual risks.
+   **Open Human Decisions** section **only if the resolution map gained new or
+   changed Open Human Decisions after Step 5** (e.g., during implementation/review).
+   If there are no remaining decisions, say `Open Human Decisions: none.` Do not
+   hide release, dependency, external-write, or behavior-changing decisions under
+   residual risks.
 10. **Commit and push through a worker.** After alignment and final human
     decisions are answered or explicitly deferred, ask the implementer to commit
-    and push only intended PR-comment-resolution files and plan evidence. The
-    supervisor must not commit or push directly. The implementer must report the
-    commit SHA, pushed branch/ref, verification evidence, files committed, files
-    intentionally left uncommitted, and residual risks.
+    and push only intended PR-comment-resolution files and plan evidence. Always
+    include the final `plans/{branch-name}/resolution-map.md` and relevant
+    `plans/{branch-name}/plans/` evidence files; these are part of the PR comment
+    resolution record and should be pushed unless the human explicitly excludes
+    them. The supervisor must not commit or push directly. The implementer must
+    report the commit SHA, pushed branch/ref, verification evidence, files
+    committed, files intentionally left uncommitted, and residual risks.
 11. **Reply and resolve after push.** Start `pr-comment-responder` only after the
     commit is pushed. Give it the final resolution map, pushed commit/branch,
     PR identifier, and repository `resolve-pr-comments` reply rules. It may
@@ -162,8 +167,10 @@ GitHub replies. The resolution map drives implementation and final replies.
   it is ready."
 - Final commit: "The resolution-map reviewer and code reviewer say this is
   ready, and final Open Human Decisions are answered or none. Commit and push
-  only intended files. Report commit SHA, pushed branch/ref, files committed,
-  verification evidence, and residual risks."
+  only intended files. Always include the final resolution map and relevant plan
+  evidence under `plans/{branch-name}/` unless the human explicitly excludes
+  them. Report commit SHA, pushed branch/ref, files committed, verification
+  evidence, and residual risks."
 - Reply/resolve: "Using the final resolution map and pushed commit, post the
   drafted GitHub replies with correlation markers and resolve only threads marked
   resolved or declined. Leave deferred/escalated threads open unless the map says

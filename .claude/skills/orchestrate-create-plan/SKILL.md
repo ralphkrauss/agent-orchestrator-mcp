@@ -98,8 +98,8 @@ critiques drafts until the plan is complete.
     them, mark them non-blocking assumptions, or promote them to Open Human
     Decisions with a concise reason and concrete options. Continue until:
    - the reviewer says the plan is ready or has no blocking feedback; and
-    - the plan creator agrees Reviewer Questions are resolved, explicitly
-    documented as assumptions, or promoted to Open Human Decisions.
+   - the plan creator agrees Reviewer Questions are resolved, explicitly
+     documented as assumptions, or promoted to Open Human Decisions.
 8. **Avoid over-specifying implementation.** The final plan should be complete
    enough to guide a developer, with clear scope, decisions, risks, tasks,
    acceptance criteria, and quality gates, but should not micromanage every

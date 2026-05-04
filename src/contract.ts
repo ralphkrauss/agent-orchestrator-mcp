@@ -395,6 +395,38 @@ export const GetRunEventsInputSchema = z.object({
 export type GetRunEventsInput = z.input<typeof GetRunEventsInputSchema>;
 export type GetRunEvents = z.output<typeof GetRunEventsInputSchema>;
 
+export const GetRunProgressInputSchema = z.object({
+  run_id: z.string().min(1),
+  after_sequence: z.number().int().nonnegative().optional(),
+  limit: z.number().int().positive().max(20).optional().default(5),
+  max_text_chars: z.number().int().min(80).max(8000).optional().default(1200),
+});
+export type GetRunProgressInput = z.input<typeof GetRunProgressInputSchema>;
+export type GetRunProgress = z.output<typeof GetRunProgressInputSchema>;
+
+export const RunProgressEventSchema = z.object({
+  seq: z.number().int().positive(),
+  ts: z.string(),
+  type: WorkerEventTypeSchema,
+  summary: z.string().nullable(),
+  text: z.string().nullable(),
+});
+export type RunProgressEvent = z.infer<typeof RunProgressEventSchema>;
+
+export const RunProgressSchema = z.object({
+  run_summary: RunSummarySchema,
+  progress: z.object({
+    event_count: z.number().int().nonnegative(),
+    next_sequence: z.number().int().nonnegative(),
+    has_more: z.boolean(),
+    latest_event_sequence: z.number().int().positive().nullable(),
+    latest_event_at: z.string().nullable(),
+    latest_text: z.string().nullable(),
+    recent_events: z.array(RunProgressEventSchema),
+  }),
+});
+export type RunProgress = z.infer<typeof RunProgressSchema>;
+
 export const WaitForRunInputSchema = z.object({
   run_id: z.string().min(1),
   wait_seconds: z.number().int().min(1).max(300),
@@ -560,6 +592,54 @@ export const ObservabilitySnapshotSchema = z.object({
 });
 export type ObservabilitySnapshot = z.infer<typeof ObservabilitySnapshotSchema>;
 
+export const RunNotificationKindSchema = z.enum(['terminal', 'fatal_error']);
+export type RunNotificationKind = z.infer<typeof RunNotificationKindSchema>;
+
+export const RunNotificationSchema = z.object({
+  notification_id: z.string().min(1),
+  seq: z.number().int().nonnegative(),
+  run_id: z.string().min(1),
+  kind: RunNotificationKindSchema,
+  status: RunStatusSchema,
+  terminal_reason: RunTerminalReasonSchema.nullable().optional().default(null),
+  latest_error: RunLatestErrorSchema.optional().default(null),
+  created_at: z.string(),
+  acked_at: z.string().nullable().optional().default(null),
+});
+export type RunNotification = z.infer<typeof RunNotificationSchema>;
+
+export const WaitForAnyRunInputSchema = z.object({
+  run_ids: z.array(z.string().min(1)).min(1).max(64),
+  wait_seconds: z.number().int().min(1).max(300),
+  after_notification_id: z.string().min(1).optional(),
+  kinds: z.array(RunNotificationKindSchema).min(1).optional(),
+});
+export type WaitForAnyRunInput = z.input<typeof WaitForAnyRunInputSchema>;
+export type WaitForAnyRun = z.output<typeof WaitForAnyRunInputSchema>;
+
+export const ListRunNotificationsInputSchema = z.object({
+  run_ids: z.array(z.string().min(1)).optional(),
+  since_notification_id: z.string().min(1).optional(),
+  kinds: z.array(RunNotificationKindSchema).min(1).optional(),
+  include_acked: z.boolean().optional().default(false),
+  limit: z.number().int().positive().max(500).optional().default(100),
+});
+export type ListRunNotificationsInput = z.input<typeof ListRunNotificationsInputSchema>;
+export type ListRunNotifications = z.output<typeof ListRunNotificationsInputSchema>;
+
+export const AckRunNotificationInputSchema = z.object({
+  notification_id: z.string().min(1),
+});
+export type AckRunNotificationInput = z.infer<typeof AckRunNotificationInputSchema>;
+
+export const RunNotificationPushPayloadSchema = z.object({
+  run_id: z.string().min(1),
+  notification_id: z.string().min(1),
+  kind: RunNotificationKindSchema,
+  status: RunStatusSchema,
+});
+export type RunNotificationPushPayload = z.infer<typeof RunNotificationPushPayloadSchema>;
+
 export const RpcMethodSchema = z.enum([
   'ping',
   'shutdown',
@@ -569,7 +649,11 @@ export const RpcMethodSchema = z.enum([
   'list_runs',
   'get_run_status',
   'get_run_events',
+  'get_run_progress',
   'wait_for_run',
+  'wait_for_any_run',
+  'list_run_notifications',
+  'ack_run_notification',
   'get_run_result',
   'send_followup',
   'cancel_run',
