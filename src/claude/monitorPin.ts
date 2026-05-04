@@ -59,12 +59,18 @@ export function resolveMonitorPin(env: NodeJS.ProcessEnv = process.env): Resolve
 }
 
 export function buildMonitorBashCommand(pin: ResolvedMonitorPin, runId: string, jsonLine = true, sinceNotificationId?: string): string {
+  if (!jsonLine) {
+    // The Claude supervisor only allowlists `--json-line` monitor invocations
+    // (see `monitor_command_patterns`). Producing the bare form here would
+    // generate a command the harness itself would reject and silently mislead
+    // future call sites or tests, so refuse it at the builder.
+    throw new Error('Claude supervisor monitor commands must use --json-line');
+  }
   if (!ulidPattern.test(runId)) throw new Error(`Unsafe run id for monitor command: ${runId}`);
   if (sinceNotificationId && !notificationIdPattern.test(sinceNotificationId)) {
     throw new Error(`Unsafe notification id for monitor command: ${sinceNotificationId}`);
   }
-  const tokens = [...pin.command_prefix, 'monitor', runId];
-  if (jsonLine) tokens.push('--json-line');
+  const tokens = [...pin.command_prefix, 'monitor', runId, '--json-line'];
   if (sinceNotificationId) tokens.push('--since', sinceNotificationId);
   return quoteCommandTokens(tokens);
 }

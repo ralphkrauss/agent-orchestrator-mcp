@@ -252,6 +252,21 @@ export class ProcessManager {
     }
 
     const parsed = backend.parseEvent(raw);
+    // Capture the latest assistant_message text in stream order *before* any
+    // awaited persistence work below. Each handleJsonLine() call runs
+    // concurrently, so awaiting first would let an older line overwrite the
+    // fallback summary with stale text after a newer line has already
+    // updated it. If a single parsed line contains multiple assistant events,
+    // use the last one in that line.
+    let latestAssistantText: string | undefined;
+    for (const event of parsed.events) {
+      if (event.type === 'assistant_message') {
+        const text = assistantMessageText(event.payload);
+        if (text) latestAssistantText = text;
+      }
+    }
+    if (latestAssistantText) sinks.setLastAssistantMessage(latestAssistantText);
+
     if (parsed.sessionId || parsed.resultEvent || parsed.filesChanged.length > 0 || parsed.commandsRun.length > 0 || parsed.errors.length > 0 || parsed.events.length > 0) {
       markActivity();
     }
@@ -272,10 +287,6 @@ export class ProcessManager {
     for (const command of parsed.commandsRun) sinks.addCommand(command);
     for (const error of parsed.errors) sinks.addError(error);
     for (const event of parsed.events) {
-      if (event.type === 'assistant_message') {
-        const text = assistantMessageText(event.payload);
-        if (text) sinks.setLastAssistantMessage(text);
-      }
       await this.store.appendEvent(runId, event);
     }
   }

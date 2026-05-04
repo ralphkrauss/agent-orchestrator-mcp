@@ -1,6 +1,7 @@
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { dirname } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import {
   AckRunNotificationInputSchema,
   BackendSchema,
@@ -368,7 +369,7 @@ export class OrchestratorService {
     }
 
     await mkdir(dirname(profilesFile), { recursive: true, mode: 0o700 });
-    await writeFile(profilesFile, `${JSON.stringify(parsedManifest.value, null, 2)}\n`, { mode: 0o600 });
+    await atomicWriteWorkerProfiles(profilesFile, `${JSON.stringify(parsedManifest.value, null, 2)}\n`);
     const updated = inspected.profiles[input.profile]!;
     return wrapOk({
       profiles_file: profilesFile,
@@ -1028,6 +1029,30 @@ function enforcePolicyContextForUpsert(
     `upsert_worker_profile is restricted to the harness-pinned profiles manifest (${resolvedAllowed}); refusing to write ${resolvedProfilesFile}`,
     { profiles_file: resolvedProfilesFile, allowed_profiles_file: resolvedAllowed },
   );
+}
+
+let atomicWriteCounter = 0;
+
+/**
+ * Replace a profiles manifest file atomically. Concurrent readers
+ * (`list_worker_profiles`, `start_run`, etc.) only ever see the prior or new
+ * full file, never a half-written truncated one. The per-manifest update lock
+ * still serializes writers; this protects independent readers.
+ */
+async function atomicWriteWorkerProfiles(profilesFile: string, content: string): Promise<void> {
+  const dir = dirname(profilesFile);
+  // Unique per-process suffix so overlapping operations cannot share a temp
+  // path even if invoked back-to-back at the same millisecond.
+  atomicWriteCounter = (atomicWriteCounter + 1) >>> 0;
+  const suffix = `${process.pid}-${Date.now()}-${atomicWriteCounter}-${randomBytes(6).toString('hex')}`;
+  const tempFile = join(dir, `.${basename(profilesFile)}.tmp-${suffix}`);
+  try {
+    await writeFile(tempFile, content, { mode: 0o600 });
+    await rename(tempFile, profilesFile);
+  } catch (error) {
+    await rm(tempFile, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function readWorkerProfileManifestForUpdate(

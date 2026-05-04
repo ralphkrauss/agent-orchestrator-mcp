@@ -365,6 +365,32 @@ describe('OpenCode orchestration harness', () => {
     }
   });
 
+  it('rejects inline profile JSON that parses but fails inspectWorkerProfiles (semantic errors must also fail fast)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-opencode-harness-bad-inspect-'));
+    const stdout = captureStream();
+    const stderr = captureStream();
+    try {
+      // Schema is satisfied (the manifest parses), but the profile id contains
+      // characters that inspectWorkerProfiles rejects, so this manifest fails
+      // at semantic inspection rather than at parse time.
+      const inspectFailureManifest = JSON.stringify({
+        version: 1,
+        profiles: {
+          'bad id!': { backend: 'opencode', model: 'opencode-default' },
+        },
+      });
+      const code = await runOpenCodeLauncher(['--cwd', root, '--profiles-json', inspectFailureManifest], {
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        env: process.env,
+      });
+      assert.equal(code, 1, 'inline manifest inspection errors must fail fast');
+      assert.notEqual(stderr.value(), '', 'expected an error message on stderr');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('rejects unsafe or non-session OpenCode passthrough', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-opencode-passthrough-'));
     const cases: Array<{ args: string[]; pattern: RegExp }> = [

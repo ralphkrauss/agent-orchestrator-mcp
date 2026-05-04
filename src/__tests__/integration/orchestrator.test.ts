@@ -458,6 +458,65 @@ describe('agent orchestrator integration with mock CLIs', () => {
     assert.equal(persisted.profiles.two?.reasoning_effort, 'high', 'second concurrent upsert must persist');
   });
 
+  it('writes profiles atomically so concurrent readers never observe a partial manifest', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+    const profilesFile = join(fixture.root, 'profiles.json');
+    const originalManifest = {
+      version: 1,
+      profiles: {
+        seed: { backend: 'codex', model: 'gpt-5.4', reasoning_effort: 'low' },
+      },
+    };
+    await writeFile(profilesFile, `${JSON.stringify(originalManifest, null, 2)}\n`);
+
+    let stop = false;
+    const observed: string[] = [];
+    const reader = (async () => {
+      while (!stop) {
+        try {
+          const text = await readFile(profilesFile, 'utf8');
+          observed.push(text);
+        } catch (error) {
+          const code = typeof error === 'object' && error && 'code' in error ? String(error.code) : '';
+          // ENOENT would mean a truncate/replace race made the live file
+          // disappear, which is exactly what the atomic rename prevents.
+          assert.ok(code === 'ENOENT' ? false : true, `unexpected read error ${code}`);
+        }
+      }
+    })();
+
+    const writes: Array<Promise<unknown>> = [];
+    for (let i = 0; i < 8; i += 1) {
+      writes.push(
+        service.upsertWorkerProfile({
+          profiles_file: profilesFile,
+          cwd: repo,
+          profile: `p${i}`,
+          backend: 'codex',
+          model: 'gpt-5.4',
+          reasoning_effort: i % 2 === 0 ? 'medium' : 'high',
+        }),
+      );
+    }
+    const results = await Promise.all(writes);
+    for (const result of results) {
+      assert.equal((result as { ok: boolean }).ok, true);
+    }
+    stop = true;
+    await reader;
+
+    // Every observed snapshot during the write storm must be parseable JSON
+    // with the manifest shape; a truncated file would throw at JSON.parse.
+    assert.ok(observed.length > 0, 'reader should have observed at least one snapshot');
+    for (const snapshot of observed) {
+      const parsed = JSON.parse(snapshot) as { version?: number; profiles?: Record<string, unknown> };
+      assert.equal(parsed.version, 1, 'every observed snapshot must have manifest version 1');
+      assert.equal(typeof parsed.profiles, 'object');
+    }
+  });
+
   it('rejects model settings that a backend cannot apply', async () => {
     const fixture = await createFixture();
     const repo = await createGitRepo(fixture.root);

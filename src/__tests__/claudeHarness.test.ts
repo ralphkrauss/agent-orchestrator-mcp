@@ -258,6 +258,34 @@ describe('Claude harness permission and allowlist', () => {
       assert.equal(evaluateClaudeBashPermission(settings, command).permitted, false, `${command} must not be permitted`);
     }
   });
+
+  it('rejects the bare monitor form so all emitted commands stay inside the JSON-line allowlist', () => {
+    const pin = resolveMonitorPin({ AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' });
+    const settings = buildClaudeSupervisorSettings({
+      monitorBashAllowPatterns: pin.monitor_bash_allow_patterns,
+    });
+    const runId = '01KQRTVEP1Y0ANFYCSXZJ2FHPZ';
+    const notificationId = '00000000000000000151-01KQRTW38GARC7T3EMG6BTRD2N';
+    // The bare form would produce a command the supervisor's own allowlist
+    // (which only enumerates --json-line shapes) does not match. The builder
+    // must refuse it instead of silently emitting an unallowlisted command.
+    assert.throws(
+      () => buildMonitorBashCommand(pin, runId, false),
+      /must use --json-line/,
+    );
+    // The supported no-cursor and cursored JSON-line shapes still match the
+    // generated Bash allow patterns and are not shadowed by deny rules.
+    for (const command of [
+      buildMonitorBashCommand(pin, runId),
+      buildMonitorBashCommand(pin, runId, true, notificationId),
+    ]) {
+      assert.ok(command.endsWith('--json-line') || command.includes('--json-line --since '));
+      const decision = evaluateClaudeBashPermission(settings, command);
+      assert.ok(decision.allowedBy.length > 0, `${command} must match a monitor allow pattern`);
+      assert.deepStrictEqual(decision.deniedBy, [], `${command} must not match any deny pattern`);
+      assert.equal(decision.permitted, true);
+    }
+  });
 });
 
 describe('Claude passthrough hardening', () => {
@@ -684,6 +712,30 @@ describe('Claude launcher envelope', () => {
       },
     );
     assert.equal(code, 1, 'inline manifest validation errors must fail fast');
+    assert.notEqual(stderr, '', 'expected an error message on stderr');
+  });
+
+  it('rejects inline --profiles-json that parses but fails inspectWorkerProfiles (semantic errors must also fail fast)', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'agent-claude-bad-inline-inspect-'));
+    // Schema is satisfied (the manifest parses), but the profile id contains
+    // characters that inspectWorkerProfiles rejects, so this manifest fails at
+    // semantic inspection rather than at parse time.
+    const inspectFailureManifest = JSON.stringify({
+      version: 1,
+      profiles: {
+        'bad id!': { backend: 'claude', model: 'claude-opus-4-7' },
+      },
+    });
+    let stderr = '';
+    const code = await runClaudeLauncher(
+      ['--cwd', cwd, '--profiles-json', inspectFailureManifest, '--print-config'],
+      {
+        stdout: { write: () => true } as unknown as NodeJS.WritableStream,
+        stderr: { write: (chunk: string | Uint8Array) => { stderr += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'); return true; } } as unknown as NodeJS.WritableStream,
+        env: { AGENT_ORCHESTRATOR_HOME: join(cwd, 'home') },
+      },
+    );
+    assert.equal(code, 1, 'inline manifest inspection errors must fail fast');
     assert.notEqual(stderr, '', 'expected an error message on stderr');
   });
 

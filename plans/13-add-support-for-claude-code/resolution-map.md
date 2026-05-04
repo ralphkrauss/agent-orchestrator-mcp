@@ -3,6 +3,7 @@ pr: 29
 url: https://github.com/ralphkrauss/agent-orchestrator/pull/29
 branch: 13-add-support-for-claude-code
 created: 2026-05-04
+updated: 2026-05-04
 generated_by: Codex resolve-pr-comments (resolution-map-only)
 ai_reply_prefix: "**[AI Agent]:**"
 scope: "Resolution map only. No implementation, no commits, no pushes, no GitHub replies."
@@ -15,6 +16,10 @@ This is the durable triage record for unresolved review feedback on PR #29,
 resolution map only. No code, docs, tests, commits, pushes, GitHub replies, or
 thread-resolution actions were performed as part of this pass.
 
+This file also includes a follow-up triage pass for the five new actionable
+comments posted after commit `e973397`. Those follow-up decisions are marked
+`F1` through `F5`.
+
 ## Counts
 
 - 8 inline review comments
@@ -25,11 +30,24 @@ thread-resolution actions were performed as part of this pass.
   noise not posted as actionable feedback, and generated-file duplicates covered
   by canonical-source fixes.
 
-Total comments: 12 | To fix: 12 | To defer: 0 | To decline: 0 | To escalate: 0
+Original mapped comments: 12 | Original to fix: 12 | Original to defer: 0 |
+Original to decline: 0 | Original to escalate: 0
+
+Follow-up comments after `e973397`: 5 | Follow-up to fix: 5 |
+Follow-up to defer: 0 | Follow-up to decline: 0 | Follow-up to escalate: 0
+
+Total mapped comments: 17 | To fix: 17 | To defer: 0 | To decline: 0 |
+To escalate: 0
 
 ## Open Human Decisions
 
 Open Human Decisions: none.
+
+The five follow-up comments are routine correctness fixes that preserve the
+approved Claude monitor, local daemon, worker-profile, and result-summary
+behavior. They do not require CTO/human product approval. Implementation must
+not remove Bash monitor support, weaken the Claude supervisor contract, or
+change generic-client behavior while addressing them.
 
 The two human decisions identified during triage were resolved on 2026-05-04:
 
@@ -89,6 +107,11 @@ and Claude Bash pattern semantics on Windows need confirmation.
 | B2 | review-body | `src/claude/launcher.ts:330-337` | coderabbitai | Alternative fix |
 | N1 | review-body nitpick | `scripts/local-orchestrator-home.mjs:10-14` | coderabbitai | Fix as suggested |
 | B3 | review-body additional | `AGENTS.md:131-134` | coderabbitai | Fix as suggested |
+| F1 | review-inline | `src/claude/launcher.ts:435` | coderabbitai | Fix as suggested |
+| F2 | review-inline | `src/claude/monitorPin.ts:69` | coderabbitai | Fix as suggested, preserve JSON-line monitor contract |
+| F3 | review-inline | `src/opencode/launcher.ts:256` | coderabbitai | Fix as suggested |
+| F4 | review-inline | `src/orchestratorService.ts:371` | coderabbitai | Fix as suggested, preserve per-manifest mutex |
+| F5 | review-body outside-diff | `src/processManager.ts:149-157` | coderabbitai | Fix as suggested, preserve stream order |
 
 ## A1 - Skill Markdown List Indentation
 
@@ -388,6 +411,163 @@ and Claude Bash pattern semantics on Windows need confirmation.
   > **[AI Agent]:** Fixed the duplicated ordered-list numbering in the AGENTS
   > local Claude smoke checklist source.
 
+## F1 - Claude Inline Profiles JSON Semantic Errors Must Fail Fast
+
+- **Comment Type:** review-inline
+- **File:** `src/claude/launcher.ts:435`
+- **Comment ID:** `3182710507`
+- **URL:** https://github.com/ralphkrauss/agent-orchestrator/pull/29#discussion_r3182710507
+- **Comment:** Inline `--profiles-json` now fails fast on schema parse errors
+  but still downgrades `inspectWorkerProfiles()` semantic errors to diagnostics.
+  Invalid inline manifests can therefore silently drop profiles and continue,
+  contradicting the fail-fast contract.
+- **Independent Assessment:** Valid. `loadProfilesForLaunch()` in the Claude
+  launcher returns diagnostics after `inspectWorkerProfiles()` even when the
+  manifest came from explicit inline JSON. That preserves file-backed manifest
+  behavior, but it is wrong for explicit inline input because operators expect
+  the provided manifest to be accepted or rejected as a whole.
+- **Decision:** fix-as-suggested
+- **Approach:** In `src/claude/launcher.ts`, after
+  `inspectWorkerProfiles(parsed.value, catalog)`, return
+  `{ ok: false, errors: inspected.errors }` when `options.profilesJson` is set
+  and `inspected.errors.length > 0`. Preserve current diagnostics-only behavior
+  for file-backed manifests. Add/extend Claude launcher coverage with a
+  syntactically valid inline manifest that parses but fails inspection, and
+  assert launcher exit code `1` plus non-empty stderr. Do not loosen profile
+  validation and do not change normal user-level manifest behavior.
+- **Files To Change:** `src/claude/launcher.ts`,
+  `src/__tests__/claudeHarness.test.ts`
+- **Reply Draft:**
+  > **[AI Agent]:** Fixed explicit Claude `--profiles-json` handling so
+  > inspection-time profile errors fail fast, matching parse/schema failures.
+  > File-backed manifests still report diagnostics without aborting launch.
+
+## F2 - Keep Monitor Command Builder Inside Allowlisted Contract
+
+- **Comment Type:** review-inline
+- **File:** `src/claude/monitorPin.ts:69`
+- **Comment ID:** `3182710544`
+- **URL:** https://github.com/ralphkrauss/agent-orchestrator/pull/29#discussion_r3182710544
+- **Comment:** `resolveMonitorPin()` only pre-approves `--json-line` monitor
+  variants, but `buildMonitorBashCommand(pin, runId, false)` still emits a bare
+  `monitor <run_id>` command that the harness itself would reject.
+- **Independent Assessment:** Valid. The exported helper defaults to the
+  allowlisted `--json-line` form, but its optional `false` path produces a
+  valid-looking command outside the Claude supervisor permission contract. This
+  can confuse future call sites and tests.
+- **Decision:** fix-as-suggested
+- **Approach:** Keep the default JSON-line behavior intact. Reject
+  `jsonLine === false` inside `buildMonitorBashCommand()` with an actionable
+  error such as `Claude supervisor monitor commands must use --json-line`, then
+  always append `--json-line` for supported commands. Search all call sites and
+  update any test that expected a bare monitor command. Add regression coverage
+  that `buildMonitorBashCommand(pin, runId, false)` throws, while the normal
+  no-cursor and cursored commands still match the generated Bash allow patterns
+  and are not shadowed by deny rules. Do not remove Bash monitor support or
+  widen the allowlist to permit the bare form.
+- **Files To Change:** `src/claude/monitorPin.ts`,
+  `src/__tests__/claudeHarness.test.ts`
+- **Reply Draft:**
+  > **[AI Agent]:** Tightened `buildMonitorBashCommand()` so it only emits the
+  > JSON-line monitor forms the Claude harness actually allowlists. The bare
+  > monitor form now fails fast instead of producing a command the supervisor
+  > would reject.
+
+## F3 - OpenCode Inline Profiles JSON Semantic Errors Must Fail Fast
+
+- **Comment Type:** review-inline
+- **File:** `src/opencode/launcher.ts:256`
+- **Comment ID:** `3182710552`
+- **URL:** https://github.com/ralphkrauss/agent-orchestrator/pull/29#discussion_r3182710552
+- **Comment:** OpenCode `--profiles-json` still bypasses fail-fast behavior for
+  inspection-time validation errors after `inspectWorkerProfiles()`.
+- **Independent Assessment:** Valid. This is the OpenCode counterpart to F1.
+  Explicit inline manifests should fail on semantic inspection errors; normal
+  file-backed manifests should keep diagnostics-only behavior.
+- **Decision:** fix-as-suggested
+- **Approach:** In `src/opencode/launcher.ts`, after
+  `inspectWorkerProfiles(parsed.value, catalog)`, return
+  `{ ok: false, errors: inspected.errors }` when `options.profilesJson` is set
+  and `inspected.errors.length > 0`. Keep the file-backed diagnostics path
+  unchanged. Add/extend OpenCode launcher coverage with a syntactically valid
+  inline manifest that parses but fails inspection, and assert launcher exit
+  code `1` plus non-empty stderr. Keep the behavior parallel with Claude.
+- **Files To Change:** `src/opencode/launcher.ts`,
+  `src/__tests__/opencodeHarness.test.ts`
+- **Reply Draft:**
+  > **[AI Agent]:** Fixed explicit OpenCode `--profiles-json` handling so
+  > inspection-time profile errors fail fast, matching parse/schema failures and
+  > the Claude launcher behavior. File-backed manifests remain diagnostics-only.
+
+## F4 - Atomic Profiles Manifest Writes
+
+- **Comment Type:** review-inline
+- **File:** `src/orchestratorService.ts:371`
+- **Comment ID:** `3183318670`
+- **URL:** https://github.com/ralphkrauss/agent-orchestrator/pull/29#discussion_r3183318670
+- **Comment:** `upsert_worker_profile` rewrites the live manifest in place. A
+  concurrent reader can observe the file after truncation but before the full
+  JSON is flushed and see a transient invalid manifest.
+- **Independent Assessment:** Valid. The existing per-manifest mutex prevents
+  concurrent upsert writers from clobbering each other, but it does not protect
+  independent readers such as `list_worker_profiles` or `start_run` from seeing
+  a partial write. A same-directory temp file followed by `rename()` is the
+  right behavior-preserving fix.
+- **Decision:** fix-as-suggested
+- **Approach:** Preserve the per-manifest update lock and replace the direct
+  `writeFile(profilesFile, ...)` with an atomic helper: ensure the parent
+  directory exists, write the JSON plus trailing newline to a unique temp file in
+  the same directory with mode `0o600`, then `rename(tempFile, profilesFile)`.
+  Best effort cleanup of the temp file on write/rename failure is acceptable.
+  Use a unique name based on process id plus timestamp/counter/random suffix so
+  overlapping operations cannot share a temp path. Do not change manifest JSON
+  shape, permissions intent, or generic-client upsert behavior. Add focused
+  regression coverage where practical: at minimum assert successful upserts
+  still preserve both concurrent changes and leave valid JSON; preferably add a
+  test or helper-level coverage that no partial live manifest is exposed during
+  the write path.
+- **Files To Change:** `src/orchestratorService.ts`,
+  `src/__tests__/integration/orchestrator.test.ts` or another focused test file
+- **Reply Draft:**
+  > **[AI Agent]:** Switched profile manifest updates to a same-directory temp
+  > write followed by `rename()`, while keeping the per-manifest mutex. Readers
+  > should no longer observe a truncated live manifest during
+  > `upsert_worker_profile`.
+
+## F5 - Preserve Stream Order For Last Assistant Message
+
+- **Comment Type:** review-body outside-diff
+- **File:** `src/processManager.ts:149-157`
+- **Review ID:** `4222120875`
+- **URL:** https://github.com/ralphkrauss/agent-orchestrator/pull/29#pullrequestreview-4222120875
+- **Comment:** `handleJsonLine()` runs concurrently. Because it awaits metadata
+  persistence before updating `lastAssistantMessage`, an older assistant-message
+  line can resume after a newer one and overwrite the fallback summary with
+  stale text.
+- **Independent Assessment:** Valid. `parseTasks` are started in stream order,
+  but each `handleJsonLine()` can suspend at `updateMeta()` before reaching the
+  assistant-message sink update. That makes `lastAssistantMessage`
+  nondeterministic under slow persistence. The fallback summary must reflect the
+  latest assistant message in stream order.
+- **Decision:** fix-as-suggested
+- **Approach:** In `src/processManager.ts`, extract the last
+  `assistant_message` text from `parsed.events` immediately after
+  `backend.parseEvent(raw)` and before any awaited work. Update
+  `lastAssistantMessage` at that point, then leave the later event append loop
+  to only persist events. If one parsed line contains multiple assistant events,
+  use the last assistant event in that parsed line. Add a deterministic
+  regression test that delays an earlier line's awaited persistence step, emits
+  an older assistant message followed by a newer one, and asserts the stored
+  fallback summary is the newer message. Do not remove the fallback behavior or
+  serialize all parsing if a narrower stream-order fix suffices.
+- **Files To Change:** `src/processManager.ts`,
+  `src/__tests__/processManager.test.ts`
+- **Reply Draft:**
+  > **[AI Agent]:** Moved `lastAssistantMessage` capture ahead of awaited
+  > persistence work so concurrent JSON-line handling preserves stream order.
+  > Added regression coverage proving the fallback summary uses the latest
+  > assistant message, not a stale earlier one.
+
 ## Skipped Items
 
 | Source | Reason |
@@ -412,6 +592,43 @@ and Claude Bash pattern semantics on Windows need confirmation.
 7. Run targeted tests during implementation, then `pnpm test` or `pnpm verify`
    before any commit/push request.
 
+### Follow-up Implementation Order After `e973397`
+
+1. Inline manifest fail-fast parity: F1 and F3 together. Keep file-backed
+   manifests diagnostics-only; only explicit `--profiles-json` should hard-fail
+   on inspection errors.
+2. Monitor builder contract: F2. Preserve the JSON-line Bash monitor wake path
+   and the current exact allowlist; do not remove Bash or widen the allowlist.
+3. Atomic profile writes: F4. Preserve the existing per-manifest mutex and
+   generic-client behavior while making the live manifest replacement atomic.
+4. Assistant-message stream order: F5. Preserve the empty-summary fallback, but
+   make the captured message deterministic by stream order.
+5. Run focused tests for the changed areas, then `pnpm build` and `pnpm test`.
+   Also smoke-check `just local claude --print-config` if monitor code changed.
+
+## Implementation Status
+
+Follow-up implementation pass on 2026-05-04 (after the resolution map was
+finalized). Original items A1-A8, B1-B3, N1 were not touched in this pass and
+remain in their previously recorded state.
+
+| ID | Status | Source Evidence | Test Evidence |
+|----|--------|-----------------|---------------|
+| F1 | implemented | `src/claude/launcher.ts:loadProfilesForLaunch` returns `{ ok: false, errors: inspected.errors }` after `inspectWorkerProfiles()` when `options.profilesJson` is set and `inspected.errors.length > 0`. File-backed manifests still flow through diagnostics. | `src/__tests__/claudeHarness.test.ts` "rejects inline --profiles-json that parses but fails inspectWorkerProfiles" — launcher exits 1 with non-empty stderr for an inline manifest with an unsafe profile id. |
+| F2 | implemented | `src/claude/monitorPin.ts:buildMonitorBashCommand` rejects `jsonLine === false` with `Claude supervisor monitor commands must use --json-line` and always appends `--json-line`. No production call site or test passed `false` previously. | `src/__tests__/claudeHarness.test.ts` "rejects the bare monitor form so all emitted commands stay inside the JSON-line allowlist" — bare form throws; no-cursor and cursored forms still match the generated allow patterns and not denied. |
+| F3 | implemented | `src/opencode/launcher.ts:loadProfilesForLaunch` mirrors F1 with the same fail-fast guard for `options.profilesJson`. | `src/__tests__/opencodeHarness.test.ts` "rejects inline profile JSON that parses but fails inspectWorkerProfiles" — launcher exits 1 with non-empty stderr. |
+| F4 | implemented | `src/orchestratorService.ts:atomicWriteWorkerProfiles` writes to a same-directory temp file (`.<basename>.tmp-<pid>-<ts>-<counter>-<rand>`, mode 0o600) then `rename()`s onto the live manifest, with best-effort cleanup on failure. The per-manifest `withProfileUpdateLock` mutex is preserved. | `src/__tests__/integration/orchestrator.test.ts` "writes profiles atomically so concurrent readers never observe a partial manifest" — busy reader during 8 concurrent upserts only observes parseable manifest snapshots; the existing "serializes concurrent upserts" test still preserves both changes. |
+| F5 | implemented | `src/processManager.ts:handleJsonLine` extracts the last `assistant_message` text from `parsed.events` and calls `setLastAssistantMessage` *before* any awaited `updateMeta`/`appendEvent` work, leaving the event-append loop to only persist events. The empty-summary fallback in `finalizeRun` is unchanged. | `src/__tests__/processManager.test.ts` "preserves stream order for the fallback assistant message even when an earlier line awaits longer" — first line's `updateMeta` is blocked until the second line finishes; final fallback summary is `NEW`, not the older `OLD`. |
+
+Verification commands run during this pass:
+
+- `pnpm build` (clean exit).
+- `node --test --test-name-pattern='monitor|inline|atomic|stream order' dist/__tests__/claudeHarness.test.js dist/__tests__/opencodeHarness.test.js dist/__tests__/processManager.test.js dist/__tests__/integration/orchestrator.test.js` — 20/20 passed including all new F1-F5 regression cases.
+- `pnpm test` — 260 passed, 1 skipped, 0 failed.
+- `just local claude --print-config` — local launcher still emits the two pinned `--json-line` Bash monitor allow patterns; bare monitor form is no longer reachable from `buildMonitorBashCommand`.
+
+No commit, push, or GitHub reply was performed in this pass.
+
 ## Current State Notes
 
 - PR metadata at triage time: PR #29 is open, non-draft, base `main`, head
@@ -419,3 +636,7 @@ and Claude Bash pattern semantics on Windows need confirmation.
 - Working tree before writing this map was clean against
   `origin/13-add-support-for-claude-code`.
 - The only intended working-tree change from this pass is this resolution map.
+- Follow-up triage after commit `e973397` identified five additional
+  behavior-preserving fixes: F1-F5 above. No source implementation, commits,
+  pushes, GitHub replies, or thread-resolution actions were performed while
+  adding those entries.

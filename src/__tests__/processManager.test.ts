@@ -557,4 +557,79 @@ process.stdin.on('end', () => {
     assert.equal(result?.summary, 'Authentication failed: invalid API key');
     assert.ok(events.events.some((event) => event.type === 'error' && event.payload.text === 'Authentication failed: invalid API key'));
   });
+
+  it('preserves stream order for the fallback assistant message even when an earlier line awaits longer', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-process-stream-order-'));
+    const store = new RunStore(root);
+    const run = await store.createRun({ backend: 'claude', cwd: root });
+    const manager = new ProcessManager(store);
+    const backend = new ClaudeBackend();
+
+    // Block the *first* updateMeta call so the older line stays suspended at
+    // its awaited persistence step until after the newer line has fully run.
+    // Subsequent updateMeta calls flow through to the real implementation.
+    let blockerCount = 0;
+    let release!: () => void;
+    const blocker = new Promise<void>((resolve) => { release = resolve; });
+    const realUpdateMeta = store.updateMeta.bind(store);
+    (store as { updateMeta: RunStore['updateMeta'] }).updateMeta = async (runId, updater) => {
+      blockerCount += 1;
+      if (blockerCount === 1) await blocker;
+      return realUpdateMeta(runId, updater);
+    };
+
+    let observed: string | undefined;
+    interface Sinks {
+      setSessionId(id: string): void;
+      setResultEvent(event: unknown): void;
+      setLastAssistantMessage(text: string): void;
+      addFile(path: string): void;
+      addCommand(command: string): void;
+      addError(error: unknown): void;
+    }
+    const sinks: Sinks = {
+      setSessionId: () => {},
+      setResultEvent: () => {},
+      setLastAssistantMessage: (text: string) => { observed = text; },
+      addFile: () => {},
+      addCommand: () => {},
+      addError: () => {},
+    };
+    const handleJsonLine = (manager as unknown as {
+      handleJsonLine(
+        runId: string,
+        backend: ClaudeBackend,
+        line: string,
+        sinks: Sinks,
+        markActivity: () => void,
+      ): Promise<void>;
+    }).handleJsonLine.bind(manager);
+
+    // Both lines carry a session_id so the original code reaches the
+    // `await this.store.updateMeta(...)` suspension before the assistant-message
+    // sink is updated.
+    const olderLine = JSON.stringify({
+      type: 'assistant',
+      session_id: 'session-1',
+      message: { model: 'claude-opus-4-7', content: [{ type: 'text', text: 'OLD' }] },
+    });
+    const newerLine = JSON.stringify({
+      type: 'assistant',
+      session_id: 'session-1',
+      message: { model: 'claude-opus-4-7', content: [{ type: 'text', text: 'NEW' }] },
+    });
+
+    const olderTask = handleJsonLine(run.run_id, backend, olderLine, sinks, () => {});
+    const newerTask = handleJsonLine(run.run_id, backend, newerLine, sinks, () => {});
+
+    await newerTask;
+    release();
+    await olderTask;
+
+    assert.equal(
+      observed,
+      'NEW',
+      'fallback assistant message must reflect the latest line in stream order, not a stale earlier one',
+    );
+  });
 });
