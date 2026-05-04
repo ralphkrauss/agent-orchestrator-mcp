@@ -3,6 +3,7 @@ import {
   type WorkerCapabilityCatalog,
 } from './capabilities.js';
 import {
+  assertClaudeBashCommandsPermitted,
   buildClaudeAllowedToolsList,
   buildClaudeSupervisorSettings,
   CLAUDE_MCP_SERVER_NAME,
@@ -11,7 +12,7 @@ import {
   stringifyClaudeSupervisorSettings,
   type ClaudeSupervisorSettings,
 } from './permission.js';
-import type { ResolvedMonitorPin } from './monitorPin.js';
+import { buildMonitorBashCommand, type ResolvedMonitorPin } from './monitorPin.js';
 import type { ResolvedClaudeSkill } from './skills.js';
 
 export interface ClaudeHarnessConfigInput {
@@ -52,6 +53,7 @@ export function buildClaudeHarnessConfig(input: ClaudeHarnessConfigInput): Claud
   const settings = buildClaudeSupervisorSettings({
     monitorBashAllowPatterns: input.monitorPin.monitor_bash_allow_patterns,
   });
+  assertMonitorPermissionInvariant(settings, input.monitorPin);
   const mcpConfig: ClaudeMcpConfig = {
     mcpServers: {
       [CLAUDE_MCP_SERVER_NAME]: {
@@ -74,6 +76,15 @@ export function buildClaudeHarnessConfig(input: ClaudeHarnessConfigInput): Claud
     mcpConfig,
     monitorPin: input.monitorPin,
   };
+}
+
+function assertMonitorPermissionInvariant(settings: ClaudeSupervisorSettings, monitorPin: ResolvedMonitorPin): void {
+  const probeRunId = '01KQRTVEP1Y0ANFYCSXZJ2FHPZ';
+  const probeNotificationId = '00000000000000000151-01KQRTW38GARC7T3EMG6BTRD2N';
+  assertClaudeBashCommandsPermitted(settings, [
+    { label: 'pinned monitor', command: buildMonitorBashCommand(monitorPin, probeRunId) },
+    { label: 'pinned monitor with cursor', command: buildMonitorBashCommand(monitorPin, probeRunId, true, probeNotificationId) },
+  ]);
 }
 
 export function stringifyClaudeMcpConfig(config: ClaudeMcpConfig): string {

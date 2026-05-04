@@ -70,8 +70,9 @@ A comprehensive Bash deny list is layered on top of the allowlist as
 defense in depth: it rejects shell metacharacters, write-shaped commands,
 mutating/network git subcommands plus their global-option bypass shapes
 (`git -C *`, `git --git-dir*`, `git --work-tree*`, `git --no-pager *`,
-`git --exec-path*`, `git --namespace*`), script interpreters (`node`,
-`python`, `perl`, `ruby`, `php`, shells), inline-script flags (`-e`, `-c`,
+`git --exec-path*`, `git --namespace*`), script interpreters except the
+monitor's required `process.execPath` Node binary (`python`, `perl`, `ruby`,
+`php`, shells, and adjacent runtimes), inline-script flags (`-e`, `-c`,
 `--eval`, `--exec`, `--command`), package managers, network/file-transfer
 tools, command-dispatch builtins (`command *`, `builtin *`), and
 backslash-escaped commands (`Bash(*\\*)`).
@@ -620,7 +621,7 @@ Sources read:
 
 ### CCS-15: Claude permission/config builder
 - **Status:** completed (2026-05-03); superseded in part by Reviewer Follow-ups #5, #8, #9 and the 2026-05-04 review-followup fixes. The text below describes the **current** behavior.
-- **Evidence:** `src/claude/permission.ts` produces `settings.json` with `defaultMode: dontAsk`. The `allow` list contains exactly: `Read`, `Glob`, `Grep`, `Bash(<pinned monitor pattern>)`, the explicit Bash inspection allowlist (`Bash(pwd)`, `Bash(git status)`, `Bash(git status *)`), `Skill`, and the curated agent-orchestrator MCP tool allowlist (Decision 22, minus `wait_for_any_run`/`wait_for_run` which are denied per Follow-up #8). The `deny` list contains `Edit`, `Write`, `WebFetch`, `WebSearch`, `Task`, `NotebookEdit`, `TodoWrite`, both denied MCP wait tools, and a comprehensive Bash deny list covering shell metacharacters, write-shaped commands, mutating/network git subcommands (including bypass shapes such as `git -C *`, `git --git-dir*`, `git --work-tree*`), script interpreters, inline-script flags (`-e`, `-c`, `--eval`, `--exec`, `--command`), package managers, network/file-transfer tools, and command-dispatch builtins (`command *`, `builtin *`). Sets `enableAllProjectMcpServers: false`. Empty `hooks` and `enabledPlugins`. The launcher pairs this with `--setting-sources user` so the only settings source is the redirected user skill mirror under `claude-supervisor/home/.claude/`; project settings are not loaded. Tests: `claudeHarness.test.ts` (built-in tool surface, settings allow/deny, comprehensive deny coverage, bypass-resistance assertions).
+- **Evidence:** `src/claude/permission.ts` produces `settings.json` with `defaultMode: dontAsk`. The `allow` list contains exactly: `Read`, `Glob`, `Grep`, `Bash(<pinned monitor pattern>)`, the explicit Bash inspection allowlist (`Bash(pwd)`, `Bash(git status)`, `Bash(git status *)`), `Skill`, and the curated agent-orchestrator MCP tool allowlist (Decision 22, minus `wait_for_any_run`/`wait_for_run` which are denied per Follow-up #8). The `deny` list contains `Edit`, `Write`, `WebFetch`, `WebSearch`, `Task`, `NotebookEdit`, `TodoWrite`, both denied MCP wait tools, and a comprehensive Bash deny list covering shell metacharacters, write-shaped commands, mutating/network git subcommands (including bypass shapes such as `git -C *`, `git --git-dir*`, `git --work-tree*`), script interpreters except the monitor's required `process.execPath` Node binary, inline-script flags (`-e`, `-c`, `--eval`, `--exec`, `--command`), package managers, network/file-transfer tools, and command-dispatch builtins (`command *`, `builtin *`). Generic Node commands remain outside the positive allowlist and inline execution remains denied, while the pinned monitor is not shadowed by `Bash(*/node *)`. Sets `enableAllProjectMcpServers: false`. Empty `hooks` and `enabledPlugins`. The launcher pairs this with `--setting-sources user` so the only settings source is the redirected user skill mirror under `claude-supervisor/home/.claude/`; project settings are not loaded. Tests: `claudeHarness.test.ts` (built-in tool surface, settings allow/deny, comprehensive deny coverage, bypass-resistance assertions, monitor allow-vs-deny shadow invariant).
 
 ### CCS-16: Claude skill curation strategy
 - **Status:** completed (2026-05-03); superseded in part by Reviewer Follow-up #10 and the 2026-05-04 plan amendment. The text below describes the **current** behavior.
@@ -639,7 +640,7 @@ Sources read:
 
 ### CCS-19: Pinned monitor command resolution and Bash allowlist
 - **Status:** completed (2026-05-03; updated 2026-05-04 to use POSIX-quoted command tokens and explicit monitor argv shapes)
-- **Evidence:** `src/claude/monitorPin.ts.resolveMonitorPin` returns `{ bin, nodePath, command_prefix, command_prefix_string, monitor_command_patterns, monitor_bash_allow_patterns }`. The bin resolves from `AGENT_ORCHESTRATOR_BIN` env (when absolute) or the package CLI script (`process.execPath` + `dist/cli.js`). Both `bin` and `nodePath` go through `assertMonitorPathIsSupported()`, which rejects characters that the supervisor's defense-in-depth Bash deny list would shadow even after POSIX quoting (single quote, `;`, `&`, `|`, `<`, `>`, `$`, backtick, backslash, CR, LF). `command_prefix_string` POSIX-quotes the `[node, bin]` tokens so install paths with spaces or parentheses (the realistic non-alphanumeric cases on macOS and bundled Node distributions) embed safely in shell command lines and `Bash(...)` permission entries. `monitor_bash_allow_patterns` contains exactly two explicit shapes: `Bash(<command-prefix> monitor * --json-line)` and `Bash(<command-prefix> monitor * --json-line --since *)`. The launcher injects the pin into the supervisor system prompt and into the `Bash(<pattern>)` allow rules of `settings.json`. Other Bash invocations are denied (the deny-by-default plus explicit `Bash` deny ensures this). Tests: `claudeHarness.test.ts` ("Claude monitor pin", POSIX-quoting case for spaces/parens, explicit rejection case for shadow-prone characters, explicit-argv-shape cases).
+- **Evidence:** `src/claude/monitorPin.ts.resolveMonitorPin` returns `{ bin, nodePath, command_prefix, command_prefix_string, monitor_command_patterns, monitor_bash_allow_patterns }`. The bin resolves from `AGENT_ORCHESTRATOR_BIN` env (when absolute) or the package CLI script (`process.execPath` + `dist/cli.js`). Both `bin` and `nodePath` go through `assertMonitorPathIsSupported()`, which rejects characters that the supervisor's defense-in-depth Bash deny list would shadow even after POSIX quoting (single quote, `;`, `&`, `|`, `<`, `>`, `$`, backtick, backslash, CR, LF). `command_prefix_string` POSIX-quotes the `[node, bin]` tokens so install paths with spaces or parentheses (the realistic non-alphanumeric cases on macOS and bundled Node distributions) embed safely in shell command lines and `Bash(...)` permission entries. `monitor_bash_allow_patterns` contains exactly two explicit shapes: `Bash(<command-prefix> monitor * --json-line)` and `Bash(<command-prefix> monitor * --json-line --since *)`. The launcher injects the pin into the supervisor system prompt and into the `Bash(<pattern>)` allow rules of `settings.json`, then asserts both exact monitor command shapes match an allow rule and no deny rule. Other Bash invocations are denied by the positive allowlist and defense-in-depth deny rules. Tests: `claudeHarness.test.ts` ("Claude monitor pin", POSIX-quoting case for spaces/parens, explicit rejection case for shadow-prone characters, explicit-argv-shape cases, monitor allow-vs-deny shadow invariant).
 
 ### CCS-20: Dual-harness docs (Claude and OpenCode side-by-side)
 - **Status:** completed (2026-05-03)
@@ -1114,6 +1115,37 @@ and supervisor session history/resume was fragmented by the changing cwd.
   reuse the same envelope path, stale poisoned discovery files are cleared on
   relaunch, and cleanup no longer removes the stable cwd. README and MCP
   tooling docs describe the stable-envelope behavior.
+
+### Post-merge regression fix (2026-05-04): monitor deny shadow and empty Codex summaries
+
+- **Symptom:** live `just local claude` testing showed the supervisor still had
+  Bash available, but the pinned monitor command was denied. The generated
+  settings allowed `Bash(<process.execPath> <cli> monitor * --json-line)` while
+  also denying `Bash(*/node *)`; Claude deny precedence shadowed the required
+  monitor command.
+- **Fix:** `src/claude/permission.ts` no longer expands `node` into first-token
+  deny patterns. Generic Node commands remain outside the positive allowlist and
+  inline execution (`node -e`, `--eval`, etc.) remains denied. The launcher now
+  asserts both exact monitor command shapes match an allow rule and no deny rule
+  before producing the harness config.
+- **Second symptom:** Codex `turn.completed` events can carry usage metadata but
+  no summary, leaving `result.json.summary` empty even though the last
+  `assistant_message` event contains the worker's actual answer.
+- **Fix:** run finalization now falls back to the last assistant message when a
+  successful backend result event has an empty summary. `get_run_result` also
+  applies the same fallback for older persisted runs whose `result.json` already
+  has an empty summary.
+- **Evidence:** `src/__tests__/claudeHarness.test.ts` covers the monitor
+  allow-vs-deny invariant and non-permitted write/exec shell samples;
+  `src/__tests__/processManager.test.ts` covers persisted summary fallback for
+  successful Codex runs; `src/__tests__/integration/orchestrator.test.ts` covers
+  `get_run_result` fallback for older empty-summary results. Verification:
+  `pnpm build`; `node --test dist/__tests__/claudeHarness.test.js
+  dist/__tests__/processManager.test.js
+  dist/__tests__/integration/orchestrator.test.js` (59 passed); `pnpm test`
+  (255 passed, 1 skipped); `just local claude --print-config` confirmed the
+  local launcher emits the two Node-backed monitor allow patterns without the
+  previous `Bash(node *)` / `Bash(*/node *)` deny shadow.
 
 ## Plan Amendment (2026-05-04, PR #26 review): Bash retired, MCP wake path
 

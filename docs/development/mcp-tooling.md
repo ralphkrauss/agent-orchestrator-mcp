@@ -196,6 +196,10 @@ Both harnesses share daemon-owned, backend-agnostic notification primitives:
   extracted text snippets. Supervisors should prefer it for user-facing
   progress/status checks instead of fetching large raw event pages or parsing
   client tool-result files.
+- `get_run_result({ run_id })` returns the terminal result. If a backend
+  completed successfully but emitted an empty result summary, the service falls
+  back to the latest assistant message so the final worker text is still
+  available.
 - `agent-orchestrator monitor <run_id>` is a one-shot CLI used by the Claude
   supervisor's pinned background Bash monitor and by non-Claude clients
   (e.g. external monitoring tools and user shells). The CLI prints

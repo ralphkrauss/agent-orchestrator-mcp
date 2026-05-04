@@ -11,6 +11,7 @@ import {
   CLAUDE_SUPERVISOR_BUILTIN_TOOLS,
   claudeOrchestratorMcpToolAllowList,
   claudeOrchestratorMcpToolDenyList,
+  evaluateClaudeBashPermission,
   orchestratorMcpToolAllowList,
   stringifyClaudeSupervisorSettings,
 } from '../claude/permission.js';
@@ -100,10 +101,12 @@ describe('Claude harness permission and allowlist', () => {
       assert.ok(settings.permissions.deny.includes(denied), `${denied} must be denied`);
     }
     // Script interpreters and inline-script flags are denied so write/exec
-    // escape hatches such as `node -e ...` or `python -c ...` cannot run even
-    // if the model picks a binary that was not enumerated by name.
+    // escape hatches such as `python -c ...` cannot run even if the model picks
+    // a binary that was not enumerated by name. `node` is intentionally omitted
+    // from first-token denies because the pinned monitor itself runs through
+    // process.execPath; generic node commands are still not permitted by the
+    // positive allowlist and inline execution is caught below.
     for (const denied of [
-      'Bash(node *)', 'Bash(*/node *)',
       'Bash(python *)', 'Bash(python3 *)', 'Bash(*/python *)', 'Bash(*/python3 *)',
       'Bash(perl *)', 'Bash(ruby *)', 'Bash(php *)',
       'Bash(bash *)', 'Bash(sh *)', 'Bash(zsh *)',
@@ -113,6 +116,9 @@ describe('Claude harness permission and allowlist', () => {
     ]) {
       assert.ok(settings.permissions.deny.includes(denied), `${denied} must be denied`);
     }
+    assert.equal(settings.permissions.deny.includes('Bash(node *)'), false, 'node first-token deny would shadow the pinned monitor');
+    assert.equal(settings.permissions.deny.includes('Bash(*/node *)'), false, 'absolute node deny would shadow the pinned monitor');
+    assert.equal(evaluateClaudeBashPermission(settings, `${process.execPath} -e "process.exit(0)"`).permitted, false);
     // Package managers and network/file-transfer tools are denied so the
     // supervisor cannot install code or exfiltrate via curl/wget/ssh/etc.
     for (const denied of [
@@ -222,6 +228,35 @@ describe('Claude harness permission and allowlist', () => {
       `Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line)`,
       `Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line --since *)`,
     ]);
+  });
+
+  it('permits the exact pinned monitor commands without deny-list shadowing', () => {
+    const pin = resolveMonitorPin({ AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' });
+    const settings = buildClaudeSupervisorSettings({
+      monitorBashAllowPatterns: pin.monitor_bash_allow_patterns,
+    });
+    const runId = '01KQRTVEP1Y0ANFYCSXZJ2FHPZ';
+    const notificationId = '00000000000000000151-01KQRTW38GARC7T3EMG6BTRD2N';
+    for (const command of [
+      buildMonitorBashCommand(pin, runId),
+      buildMonitorBashCommand(pin, runId, true, notificationId),
+    ]) {
+      const decision = evaluateClaudeBashPermission(settings, command);
+      assert.ok(decision.allowedBy.length > 0, `${command} must match a monitor allow pattern`);
+      assert.deepStrictEqual(decision.deniedBy, [], `${command} must not match any deny pattern`);
+      assert.equal(decision.permitted, true);
+    }
+
+    for (const command of [
+      'touch /tmp/x',
+      `${process.execPath} -e "require('fs').writeFileSync('/tmp/x','x')"`,
+      'git add README.md',
+      'git -C . add README.md',
+      'command touch /tmp/x',
+      `${buildMonitorBashCommand(pin, runId)} && touch /tmp/x`,
+    ]) {
+      assert.equal(evaluateClaudeBashPermission(settings, command).permitted, false, `${command} must not be permitted`);
+    }
   });
 });
 

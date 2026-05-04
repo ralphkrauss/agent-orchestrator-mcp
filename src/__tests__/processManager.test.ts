@@ -287,6 +287,37 @@ process.stdin.on('end', () => {
     assert.deepStrictEqual(result?.errors, []);
   });
 
+  it('uses the last assistant message when a successful Codex result event has an empty summary', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-process-'));
+    const cli = join(root, 'worker.js');
+    await writeFile(cli, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({ type: 'thread.started', thread_id: 'session-1' }));
+  console.log(JSON.stringify({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: 'Final worker answer.' } }));
+  console.log(JSON.stringify({ type: 'turn.completed', usage: { output_tokens: 4 } }));
+  process.exit(0);
+});
+`);
+    await chmod(cli, 0o755);
+
+    const store = new RunStore(root);
+    const run = await store.createRun({ backend: 'codex', cwd: root });
+    const manager = new ProcessManager(store);
+    const managed = await manager.start(run.run_id, new CodexBackend(), {
+      command: cli,
+      args: [],
+      cwd: root,
+      stdinPayload: 'finish',
+    });
+
+    await managed.completion;
+    const result = await store.loadResult(run.run_id);
+    assert.equal(result?.status, 'completed');
+    assert.equal(result?.summary, 'Final worker answer.');
+    assert.deepStrictEqual(result?.errors, []);
+  });
+
   it('routes stream-side persistence failures through finalization failure', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-process-'));
     const cli = join(root, 'worker.js');

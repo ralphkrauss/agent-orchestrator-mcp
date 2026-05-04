@@ -40,6 +40,28 @@ describe('agent orchestrator integration with mock CLIs', () => {
     assert.equal((result.ok ? (result as unknown as { run_summary: { session_id: string } }).run_summary : null)?.session_id, 'codex-session-1');
   });
 
+  it('get_run_result falls back to the last assistant message for older empty-summary results', async () => {
+    const fixture = await createFixture();
+    const store = new RunStore(fixture.home);
+    const service = new OrchestratorService(store, createBackendRegistry(store));
+    await service.initialize();
+    const run = await store.createRun({ backend: 'codex', cwd: fixture.root });
+    await store.appendEvent(run.run_id, { type: 'assistant_message', payload: { text: 'Stored final answer.' } });
+    await store.markTerminal(run.run_id, 'completed', [], {
+      status: 'completed',
+      summary: '',
+      files_changed: [],
+      commands_run: [],
+      artifacts: [],
+      errors: [],
+    });
+
+    const result = await service.getRunResult({ run_id: run.run_id });
+    assert.equal(result.ok, true);
+    const payload = result.ok ? (result as unknown as { result: { summary: string } }).result : null;
+    assert.equal(payload?.summary, 'Stored final answer.');
+  });
+
   it('runs Claude in a non-git cwd with event-derived files_changed fallback', async () => {
     const fixture = await createFixture();
     const cwd = await mkdtemp(join(tmpdir(), 'agent-non-git-'));

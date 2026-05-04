@@ -31,6 +31,12 @@ export interface ClaudeSupervisorPermissionInput {
   monitorBashAllowPatterns: readonly string[];
 }
 
+export interface ClaudeBashPermissionDecision {
+  permitted: boolean;
+  allowedBy: string[];
+  deniedBy: string[];
+}
+
 const CLAUDE_SUPERVISOR_DENIED_MCP_TOOL_NAMES = ['wait_for_any_run', 'wait_for_run'] as const;
 
 /**
@@ -65,7 +71,11 @@ const CLAUDE_DENIED_COMMAND_NAMES = [
   'touch', 'mkdir', 'rm', 'rmdir', 'mv', 'cp', 'chmod', 'chown', 'chgrp',
   'ln', 'tee', 'dd', 'truncate', 'install', 'patch', 'sync',
   // script interpreters / eval / exec entry points
-  'node', 'deno', 'bun', 'tsx', 'ts-node',
+  // `node` is intentionally not included here: the pinned monitor itself runs
+  // through process.execPath. Generic `node ...` commands remain outside the
+  // positive Bash allowlist and are denied by dontAsk; inline execution is also
+  // caught by the `*-e *` / `*--eval*` deny patterns below.
+  'deno', 'bun', 'tsx', 'ts-node',
   'python', 'python3', 'perl', 'ruby', 'php', 'lua', 'osascript',
   'bash', 'sh', 'zsh', 'fish', 'dash', 'ksh', 'csh', 'tcsh',
   'eval', 'exec', 'source', 'env', 'xargs', 'parallel', 'sudo', 'su', 'doas',
@@ -228,4 +238,38 @@ export function buildClaudeSupervisorSettings(input: ClaudeSupervisorPermissionI
 
 export function stringifyClaudeSupervisorSettings(settings: ClaudeSupervisorSettings): string {
   return `${JSON.stringify(settings, null, 2)}\n`;
+}
+
+export function evaluateClaudeBashPermission(settings: ClaudeSupervisorSettings, command: string): ClaudeBashPermissionDecision {
+  const invocation = `Bash(${command})`;
+  const allowedBy = settings.permissions.allow.filter((entry) => claudePermissionPatternMatches(entry, invocation));
+  const deniedBy = settings.permissions.deny.filter((entry) => claudePermissionPatternMatches(entry, invocation));
+  return {
+    permitted: allowedBy.length > 0 && deniedBy.length === 0,
+    allowedBy,
+    deniedBy,
+  };
+}
+
+export function assertClaudeBashCommandsPermitted(settings: ClaudeSupervisorSettings, commands: readonly { label: string; command: string }[]): void {
+  for (const { label, command } of commands) {
+    const decision = evaluateClaudeBashPermission(settings, command);
+    if (decision.permitted) continue;
+    const reason = decision.allowedBy.length === 0
+      ? 'does not match any allow pattern'
+      : `is shadowed by deny pattern(s): ${decision.deniedBy.join(', ')}`;
+    throw new Error(`Claude Bash permission invariant failed for ${label}: ${JSON.stringify(command)} ${reason}`);
+  }
+}
+
+function claudePermissionPatternMatches(pattern: string, invocation: string): boolean {
+  return globPatternToRegExp(pattern).test(invocation);
+}
+
+function globPatternToRegExp(pattern: string): RegExp {
+  const source = pattern
+    .split('*')
+    .map((part) => part.replace(/[\\^$+?.()|[\]{}]/g, '\\$&'))
+    .join('.*');
+  return new RegExp(`^${source}$`, 's');
 }

@@ -648,6 +648,10 @@ parse client tool-result files. Use `get_run_events` only when raw backend
 events are explicitly needed, with a small `limit` and an `after_sequence`
 cursor.
 
+For backends that emit a terminal result event without a summary, such as some
+Codex JSON streams, `get_run_result` falls back to the latest assistant message
+so terminal results still include the worker's final text.
+
 The `agent-orchestrator monitor <run_id>` CLI is a one-shot notification bridge
 that blocks against the daemon, prints exactly one JSON line when a terminal or
 fatal-error notification arrives, and exits with a documented code: `0`

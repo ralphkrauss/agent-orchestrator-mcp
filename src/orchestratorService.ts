@@ -597,7 +597,7 @@ export class OrchestratorService {
     if (!parsed.success) return invalidInput(parsed.error.message);
     const run = await this.store.loadRun(parsed.data.run_id);
     if (!run) return unknownRun(parsed.data.run_id);
-    return wrapOk({ run_summary: run.meta, result: run.result });
+    return wrapOk({ run_summary: run.meta, result: resultWithAssistantSummaryFallback(run.result, run.events) });
   }
 
   async shutdown(params: unknown): Promise<ToolResult> {
@@ -894,6 +894,22 @@ function progressEventSummary(event: WorkerEvent): string | null {
       ?? stringFromRecord(event.payload, 'state')
       ?? stringFromRecord(event.payload, 'subtype');
     return status ? `lifecycle: ${status}` : 'lifecycle';
+  }
+  return null;
+}
+
+function resultWithAssistantSummaryFallback(result: WorkerResult | null, events: WorkerEvent[]): WorkerResult | null {
+  if (!result || result.summary.trim()) return result;
+  const fallback = latestAssistantMessage(events);
+  return fallback ? { ...result, summary: fallback } : result;
+}
+
+function latestAssistantMessage(events: WorkerEvent[]): string | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.type !== 'assistant_message') continue;
+    const text = textFromValue(event.payload);
+    if (text) return text;
   }
   return null;
 }
