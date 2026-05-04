@@ -138,8 +138,10 @@ Claude-specific safe MCP allowlist, `--permission-mode dontAsk`,
 `HOME`, `XDG_CONFIG_HOME`, and `CLAUDE_CONFIG_DIR` to that durable state
 directory. `wait_for_run` and `wait_for_any_run` are denied for the Claude
 supervisor because the pinned background Bash monitor is its current-turn wake
-path. The Bash allowlist contains exactly four patterns: the pinned monitor
-command, `Bash(pwd)`, `Bash(git status)`, and `Bash(git status *)`. Other
+path. The Bash allowlist contains exactly five patterns: two explicit monitor
+argv shapes (`Bash(<node> <cli> monitor * --json-line)` and the cursored
+`Bash(<node> <cli> monitor * --json-line --since *)`), `Bash(pwd)`,
+`Bash(git status)`, and `Bash(git status *)`. Other
 read-only commands such as `cat`, `ls`, `head`, `tail`, `grep`, `find`, `jq`,
 `git log`, `git diff`, `git show`, `git rev-parse`, and `git branch` are not
 allowlisted; the supervisor uses `Read`, `Glob`, `Grep`, and the agent-orchestrator

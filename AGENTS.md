@@ -128,9 +128,9 @@ end-to-end check of the current branch. Do not use this path outside tmux.
   4. Ask Claude to try harmless adversarial shell commands: `pwd` and
      `git status --short` may run; `touch /tmp/...`, `git add ...`, and
      `pwd && touch /tmp/...` must be denied and must not create files.
-  4. Start a harmless worker such as `generalist` with a `SMOKE_OK` prompt and
+  5. Start a harmless worker such as `generalist` with a `SMOKE_OK` prompt and
      confirm Claude monitors it with the pinned Bash monitor command.
-  5. Ask for a scope or behavior change disguised as a small fix and confirm
+  6. Ask for a scope or behavior change disguised as a small fix and confirm
      Claude asks for human approval before proceeding.
 - Only repair real user profile files after explicit user approval. Prefer
   `upsert_worker_profile`, do not start a worker for profile repair, and report

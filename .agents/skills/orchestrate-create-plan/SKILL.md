@@ -90,29 +90,29 @@ human with concrete options.
       Open Human Decisions, risks, and implementation tasks, using `none` for
       empty sections.
 4. **Start the reviewer.** Ask the reviewer to get familiar with the same issue,
-   repository context, and current plan draft. Instruct it to:
+    repository context, and current plan draft. Instruct it to:
     - answer the plan creator's Reviewer Questions when confidence is high based
       on the issue, repository context, existing patterns, and project rules;
-   - flag when a question depends on product intent or requirements that cannot
-     be inferred from the issue or codebase;
-   - flag any proposed scope substitution, such as replacing the user's named
-     technology, API, SDK, product surface, or acceptance target with a different
-     implementation surface;
-   - flag any proposed permission/tool-surface, workflow, public-contract, or
-     user-facing behavior change that is not explicitly approved by the issue,
-     plan, or human;
-   - review the plan for unclear, underspecified, incorrect, risky, or missing
-     content;
-   - provide concise, actionable feedback for the plan creator.
+    - flag when a question depends on product intent or requirements that cannot
+      be inferred from the issue or codebase;
+    - flag any proposed scope substitution, such as replacing the user's named
+      technology, API, SDK, product surface, or acceptance target with a different
+      implementation surface;
+    - flag any proposed permission/tool-surface, workflow, public-contract, or
+      user-facing behavior change that is not explicitly approved by the issue,
+      plan, or human;
+    - review the plan for unclear, underspecified, incorrect, risky, or missing
+      content;
+    - provide concise, actionable feedback for the plan creator.
 5. **Bridge questions without defaulting to the human.** When the plan creator
     records Reviewer Questions, send them to the reviewer first. The reviewer
     should answer or resolve every question it can, then identify only the
     residual **Open Human Decisions**. Only ask the human when both conditions
     are true:
-   - the question affects product requirements, user-facing behavior, scope, or
-     acceptance criteria; and
-   - the reviewer is not confident answering from the issue and repository
-     context.
+    - the question affects product requirements, user-facing behavior, scope, or
+      acceptance criteria; and
+    - the reviewer is not confident answering from the issue and repository
+      context.
 6. **Escalate material behavior or scope changes before alignment.** If either
    worker proposes a material scope substitution, behavior change, permission or
    tool-surface change, public contract change, release/publish policy change,
@@ -128,9 +128,9 @@ human with concrete options.
     reviewer. If any Reviewer Questions remain, the reviewer must either answer
     them, mark them non-blocking assumptions, or promote them to Open Human
     Decisions with a concise reason and concrete options. Continue until:
-   - the reviewer says the plan is ready or has no blocking feedback; and
-   - the plan creator agrees Reviewer Questions are resolved, explicitly
-     documented as assumptions, or promoted to Open Human Decisions.
+    - the reviewer says the plan is ready or has no blocking feedback; and
+    - the plan creator agrees Reviewer Questions are resolved, explicitly
+      documented as assumptions, or promoted to Open Human Decisions.
 8. **Avoid over-specifying implementation.** The final plan should be complete
    enough to guide a developer, with clear scope, decisions, risks, tasks,
    acceptance criteria, and quality gates, but should not micromanage every

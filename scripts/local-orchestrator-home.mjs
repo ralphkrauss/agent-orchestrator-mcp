@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = realpathSync(resolve(scriptDir, '..'));
-const base = process.env.AGENT_ORCHESTRATOR_LOCAL_BASE || join(tmpdir(), 'agent-orchestrator-local');
+const configuredBase = process.env.AGENT_ORCHESTRATOR_LOCAL_BASE || join(tmpdir(), 'agent-orchestrator-local');
+const base = resolve(configuredBase);
 const slug = sanitizePathSegment(basename(repoRoot) || 'checkout');
 const hash = createHash('sha256').update(repoRoot).digest('hex').slice(0, 12);
 

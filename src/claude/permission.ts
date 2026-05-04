@@ -22,7 +22,13 @@ export interface ClaudeSupervisorSettings {
 }
 
 export interface ClaudeSupervisorPermissionInput {
-  monitorBashAllowlistPattern: string;
+  /**
+   * Explicit `Bash(...)` monitor allow patterns. The Claude harness supplies
+   * exactly the argv shapes that `buildMonitorBashCommand()` produces, so the
+   * Bash permission cannot be wider than the supervisor's pinned monitor
+   * invocations.
+   */
+  monitorBashAllowPatterns: readonly string[];
 }
 
 const CLAUDE_SUPERVISOR_DENIED_MCP_TOOL_NAMES = ['wait_for_any_run', 'wait_for_run'] as const;
@@ -184,7 +190,7 @@ export function buildClaudeAllowedToolsList(input: ClaudeSupervisorPermissionInp
     'Read',
     'Glob',
     'Grep',
-    `Bash(${input.monitorBashAllowlistPattern})`,
+    ...input.monitorBashAllowPatterns,
     ...CLAUDE_SUPERVISOR_BASH_INSPECTION_ALLOWLIST,
     'Skill',
     ...claudeOrchestratorMcpToolAllowList(),

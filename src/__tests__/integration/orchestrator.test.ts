@@ -352,6 +352,90 @@ describe('agent orchestrator integration with mock CLIs', () => {
     assert.equal(listedPayload.invalid_profiles[0]?.id, 'unrelated');
   });
 
+  it('enforces per-request writable-profiles policy context inside the daemon write path', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+    const pinnedFile = join(fixture.root, 'pinned.json');
+    const otherFile = join(fixture.root, 'other.json');
+    await writeFile(pinnedFile, JSON.stringify({ version: 1, profiles: {} }, null, 2));
+    await writeFile(otherFile, JSON.stringify({ version: 1, profiles: {} }, null, 2));
+
+    // Pinned-path upsert with matching policy context succeeds.
+    const allowed = await service.dispatch('upsert_worker_profile', {
+      profiles_file: pinnedFile,
+      cwd: repo,
+      profile: 'planner',
+      backend: 'codex',
+      model: 'gpt-5.4',
+      reasoning_effort: 'medium',
+    }, { policy_context: { writable_profiles_file: pinnedFile } });
+    const allowedRes = allowed as { ok: boolean };
+    assert.equal(allowedRes.ok, true, 'pinned-path upsert with matching policy must succeed');
+
+    // Non-pinned upsert with policy context is denied by the daemon write path.
+    const denied = await service.dispatch('upsert_worker_profile', {
+      profiles_file: otherFile,
+      cwd: repo,
+      profile: 'planner',
+      backend: 'codex',
+      model: 'gpt-5.4',
+      reasoning_effort: 'medium',
+    }, { policy_context: { writable_profiles_file: pinnedFile } });
+    const deniedRes = denied as { ok: false; error: { code: string; message: string } };
+    assert.equal(deniedRes.ok, false);
+    assert.equal(deniedRes.error.code, 'INVALID_INPUT');
+    assert.match(deniedRes.error.message, /restricted to the harness-pinned profiles manifest/);
+    const otherContent = JSON.parse(await readFile(otherFile, 'utf8')) as { profiles: Record<string, unknown> };
+    assert.deepStrictEqual(otherContent.profiles, {}, 'denied upsert must not write to non-pinned manifest');
+
+    // Generic client without policy context can write any path.
+    const generic = await service.dispatch('upsert_worker_profile', {
+      profiles_file: otherFile,
+      cwd: repo,
+      profile: 'planner',
+      backend: 'codex',
+      model: 'gpt-5.4',
+      reasoning_effort: 'medium',
+    });
+    const genericRes = generic as { ok: boolean };
+    assert.equal(genericRes.ok, true, 'generic client (no policy context) keeps current behavior');
+  });
+
+  it('serializes concurrent upserts to the same manifest so neither change is lost', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+    const profilesFile = join(fixture.root, 'profiles.json');
+    await writeFile(profilesFile, JSON.stringify({ version: 1, profiles: {} }, null, 2));
+
+    const [a, b] = await Promise.all([
+      service.upsertWorkerProfile({
+        profiles_file: profilesFile,
+        cwd: repo,
+        profile: 'one',
+        backend: 'codex',
+        model: 'gpt-5.4',
+        reasoning_effort: 'medium',
+      }),
+      service.upsertWorkerProfile({
+        profiles_file: profilesFile,
+        cwd: repo,
+        profile: 'two',
+        backend: 'codex',
+        model: 'gpt-5.4',
+        reasoning_effort: 'high',
+      }),
+    ]);
+    assert.equal(a.ok, true);
+    assert.equal(b.ok, true);
+    const persisted = JSON.parse(await readFile(profilesFile, 'utf8')) as {
+      profiles: Record<string, { reasoning_effort?: string }>;
+    };
+    assert.equal(persisted.profiles.one?.reasoning_effort, 'medium', 'first concurrent upsert must persist');
+    assert.equal(persisted.profiles.two?.reasoning_effort, 'high', 'second concurrent upsert must persist');
+  });
+
   it('rejects model settings that a backend cannot apply', async () => {
     const fixture = await createFixture();
     const repo = await createGitRepo(fixture.root);

@@ -345,6 +345,26 @@ describe('OpenCode orchestration harness', () => {
     }
   });
 
+  it('rejects inline profile JSON that fails manifest validation (matches the syntax-error fail-fast behavior)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-opencode-harness-bad-schema-'));
+    const stdout = captureStream();
+    const stderr = captureStream();
+    try {
+      // Manifest schema is strict; an unknown top-level field triggers
+      // parseWorkerProfileManifest to reject the manifest.
+      const badManifest = JSON.stringify({ version: 1, profiles: {}, unexpected: true });
+      const code = await runOpenCodeLauncher(['--cwd', root, '--profiles-json', badManifest], {
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        env: process.env,
+      });
+      assert.equal(code, 1, 'inline manifest validation errors must fail fast');
+      assert.notEqual(stderr.value(), '', 'expected an error message on stderr');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('rejects unsafe or non-session OpenCode passthrough', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-opencode-passthrough-'));
     const cases: Array<{ args: string[]; pattern: RegExp }> = [

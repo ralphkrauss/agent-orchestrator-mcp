@@ -57,9 +57,11 @@ This plan covers three interleaved deliverables, sequenced **B → A → C**:
 
 Current implementation note: the Claude supervisor's built-in tool surface is
 `Read`, `Glob`, `Grep`, `Bash`, `Skill`. Bash is exposed with a positive
-allowlist of exactly four patterns: the pinned daemon monitor command
-(`Bash(<absolute-bin> monitor *)`), `Bash(pwd)`, `Bash(git status)`, and
-`Bash(git status *)`. Anything else is not in the allowlist and is denied
+allowlist of exactly five patterns: two explicit pinned daemon monitor argv
+shapes generated from POSIX-quoted command tokens
+(`Bash(<command-prefix> monitor * --json-line)` and the cursored
+`Bash(<command-prefix> monitor * --json-line --since *)`), `Bash(pwd)`,
+`Bash(git status)`, and `Bash(git status *)`. Anything else is not in the allowlist and is denied
 by `--permission-mode dontAsk`; the supervisor must use Read/Glob/Grep and
 the agent-orchestrator MCP tools for everything else, including read-only
 inspection commands such as `cat`, `ls`, `head`, `tail`, `grep`, `find`,
@@ -158,8 +160,9 @@ Sources read:
 >   `TodoWrite`, `wait_for_any_run`, and `wait_for_run` are denied.
 > - **Monitor command (Decision 23, current):** the pinned
 >   `<absolute-bin> monitor <run_id> [--json-line] [--since <id>]` shape is
->   the supervisor's primary current-turn wake path; the four-pattern
->   allowlist above keeps that shape pre-approved. `pwd` and
+>   the supervisor's primary current-turn wake path; the five-pattern
+>   allowlist above keeps both monitor argv shapes (no-cursor and cursored)
+>   pre-approved as explicit `Bash(...)` rules. `pwd` and
 >   `git status [args]` are also allowlisted as small read-only inspection
 >   commands; everything else (e.g. `cat`, `ls`, `git log`, `git diff`,
 >   `command touch`, `git -C dir add`) is denied.
@@ -262,8 +265,10 @@ Sources read:
     `--add-dir`, `--bare`, and any setting/skill/command/agent override
     flags.
   - **Pinned monitor command** per Decision 23 (as adjusted by the 2026-05-04
-    review-followup): the Bash allowlist contains exactly four patterns —
-    `<absolute-bin> monitor <run_id> [--json-line] [--since <id>]`,
+    review-followup): the Bash allowlist contains exactly five patterns —
+    two explicit pinned monitor argv shapes
+    (`Bash(<command-prefix> monitor * --json-line)` and the cursored
+    `Bash(<command-prefix> monitor * --json-line --since *)`),
     `Bash(pwd)`, `Bash(git status)`, and `Bash(git status *)`. Every other
     Bash invocation (including read-only commands such as `cat`, `ls`,
     `head`, `tail`, `grep`, `find`, `jq`, `git log`, `git diff`, `git show`,
@@ -416,12 +421,14 @@ Sources read:
 >   `commit`, etc. are exposed alongside `orchestrate-*`), in addition to
 >   the curated orchestrate-* snapshot. The launcher uses
 >   `--setting-sources user` rather than `--setting-sources ""`.
-> - CCS-19's pinned monitor pattern is one of the four allowlist entries,
->   not the only Bash entry.
-> - CCS-22 leak-proof tests assert the four-pattern Bash allowlist plus the
->   bypass-resistance deny shapes, not "the Bash allowlist matches the
->   pinned monitor command exactly". They also assert the MCP server entry
->   pins `AGENT_ORCHESTRATOR_WRITABLE_PROFILES_FILE` so
+> - CCS-19's pinned monitor patterns are two of the five allowlist entries
+>   (no-cursor and cursored argv shapes generated from POSIX-quoted command
+>   tokens), not the only Bash entry.
+> - CCS-22 leak-proof tests assert the five-pattern Bash allowlist (two
+>   explicit monitor argv shapes plus `pwd`, `git status`, and
+>   `git status *`) plus the bypass-resistance deny shapes, not "the Bash
+>   allowlist matches the pinned monitor command exactly". They also assert
+>   the MCP server entry pins `AGENT_ORCHESTRATOR_WRITABLE_PROFILES_FILE` so
 >   `upsert_worker_profile` is restricted to the harness-provided manifest
 >   path.
 
@@ -623,16 +630,16 @@ Sources read:
   - The launcher uses `--setting-sources user` (not `""`) and does **not** pass `--disable-slash-commands`; slash command discovery is enabled but is sourced only from the redirected user skill mirror plus the curated envelope snapshot, never from the user's real `~/.claude/` or from any project settings file in the target workspace. Tests: `claudeHarness.test.ts` ("Claude skill curation" and the leak-proof test).
 
 ### CCS-17: Claude CLI passthrough hardening
-- **Status:** completed (2026-05-03)
-- **Evidence:** `src/claude/passthrough.ts` parses tokens after `--` and rejects: `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, `--mcp-config`, `--strict-mcp-config`, `--allowedTools`/`--allowed-tools`, `--disallowedTools`/`--disallowed-tools`, `--add-dir`, `--settings`, `--setting-sources`, `--system-prompt(-file)`, `--append-system-prompt(-file)`, `--plugin-dir`, `--agents`, `--agent`, `--permission-mode`, `--tools`, `--disable-slash-commands`. Allows: `--print`, `-p`, `--output-format`, `--input-format`, `--include-partial-messages`, `--include-hook-events`, `--verbose`, `--debug`, `-d`, `--debug-file`, `--name`, `-n`, `--exclude-dynamic-system-prompt-sections`, `--no-session-persistence`, `--bare`. Tests: `claudeHarness.test.ts` ("Claude passthrough hardening").
+- **Status:** completed (2026-05-03; tightened 2026-05-04 — `--bare` and `--debug-file` moved out of the allow list)
+- **Evidence:** `src/claude/passthrough.ts` parses tokens after `--` and rejects: `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, `--mcp-config`, `--strict-mcp-config`, `--allowedTools`/`--allowed-tools`, `--disallowedTools`/`--disallowed-tools`, `--add-dir`, `--settings`, `--setting-sources`, `--system-prompt(-file)`, `--append-system-prompt(-file)`, `--plugin-dir`, `--agents`, `--agent`, `--permission-mode`, `--tools`, `--disable-slash-commands`, `--bare` (changes Claude memory/plugin/auth/discovery behavior the harness owns), and `--debug-file(=...)` (the unknown-flag path; would let Claude write outside the harness state dir). Allows: `--print`, `-p`, `--output-format`, `--input-format`, `--include-partial-messages`, `--include-hook-events`, `--verbose`, `--debug`, `-d`, `--name`, `-n`, `--exclude-dynamic-system-prompt-sections`, `--no-session-persistence`. Tests: `claudeHarness.test.ts` ("Claude passthrough hardening", including explicit `--bare` and `--debug-file` rejection cases).
 
 ### CCS-18: MCP and tool allowlist enforcement
 - **Status:** completed (2026-05-03)
 - **Evidence:** `src/claude/permission.ts` derives the agent-orchestrator MCP allowlist directly from `tools` exported by `src/mcpTools.ts` (`mcp__agent-orchestrator__<tool>`). The system prompt enumerates the same list. Test: `claudeHarness.test.ts` ("orchestratorMcpToolAllowList matches every registered MCP tool exactly").
 
 ### CCS-19: Pinned monitor command resolution and Bash allowlist
-- **Status:** completed (2026-05-03)
-- **Evidence:** `src/claude/monitorPin.ts.resolveMonitorPin` returns `{ bin, args_template, bash_allowlist_pattern }`. The bin resolves from `AGENT_ORCHESTRATOR_BIN` env (when absolute) or the package CLI script (`process.execPath` + `dist/cli.js`). The Bash allowlist pattern is `${process.execPath} ${bin} monitor *`. The launcher injects the pin into the supervisor system prompt and into the `Bash(<pattern>)` allow rule of `settings.json`. Other Bash invocations are denied (the deny-by-default plus explicit `Bash` deny ensures this). Tests: `claudeHarness.test.ts` ("Claude monitor pin").
+- **Status:** completed (2026-05-03; updated 2026-05-04 to use POSIX-quoted command tokens and explicit monitor argv shapes)
+- **Evidence:** `src/claude/monitorPin.ts.resolveMonitorPin` returns `{ bin, nodePath, command_prefix, command_prefix_string, monitor_command_patterns, monitor_bash_allow_patterns }`. The bin resolves from `AGENT_ORCHESTRATOR_BIN` env (when absolute) or the package CLI script (`process.execPath` + `dist/cli.js`). Both `bin` and `nodePath` go through `assertMonitorPathIsSupported()`, which rejects characters that the supervisor's defense-in-depth Bash deny list would shadow even after POSIX quoting (single quote, `;`, `&`, `|`, `<`, `>`, `$`, backtick, backslash, CR, LF). `command_prefix_string` POSIX-quotes the `[node, bin]` tokens so install paths with spaces or parentheses (the realistic non-alphanumeric cases on macOS and bundled Node distributions) embed safely in shell command lines and `Bash(...)` permission entries. `monitor_bash_allow_patterns` contains exactly two explicit shapes: `Bash(<command-prefix> monitor * --json-line)` and `Bash(<command-prefix> monitor * --json-line --since *)`. The launcher injects the pin into the supervisor system prompt and into the `Bash(<pattern>)` allow rules of `settings.json`. Other Bash invocations are denied (the deny-by-default plus explicit `Bash` deny ensures this). Tests: `claudeHarness.test.ts` ("Claude monitor pin", POSIX-quoting case for spaces/parens, explicit rejection case for shadow-prone characters, explicit-argv-shape cases).
 
 ### CCS-20: Dual-harness docs (Claude and OpenCode side-by-side)
 - **Status:** completed (2026-05-03)

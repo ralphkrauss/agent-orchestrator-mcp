@@ -333,7 +333,7 @@ export async function buildClaudeEnvelope(input: {
     systemPromptPath,
     builtinTools: [...CLAUDE_SUPERVISOR_BUILTIN_TOOLS],
     allowedTools: buildClaudeAllowedToolsList({
-      monitorBashAllowlistPattern: monitorPin.bash_allowlist_pattern,
+      monitorBashAllowPatterns: monitorPin.monitor_bash_allow_patterns,
     }),
     passthrough: options.claudeArgs,
   });
@@ -390,10 +390,11 @@ export function buildClaudeSpawnArgs(input: {
   // - Slash commands stay enabled so the supervisor keeps normal Claude Code
   //   controls such as /exit and /skills.
   // - --tools restricts built-in tool *availability* to read-only inspection,
-  //   Skill, and Bash. The Bash allowlist contains exactly four patterns:
-  //   the pinned monitor command, Bash(pwd), Bash(git status), and
-  //   Bash(git status *). --permission-mode dontAsk denies anything outside
-  //   the allowlist instead of surfacing permission prompts.
+  //   Skill, and Bash. The Bash allowlist contains exactly five patterns:
+  //   two explicit pinned monitor argv shapes (no-cursor and cursored),
+  //   Bash(pwd), Bash(git status), and Bash(git status *).
+  //   --permission-mode dontAsk denies anything outside the allowlist
+  //   instead of surfacing permission prompts.
   // - --add-dir is intentionally NOT passed; cwd already is the target workspace.
   const args = [
     '--strict-mcp-config',
@@ -419,7 +420,13 @@ async function loadProfilesForLaunch(
     return { ok: true, profiles: undefined, diagnostics: [raw.error] };
   }
   const parsed = parseWorkerProfileManifest(raw.value);
-  if (!parsed.ok) return { ok: true, profiles: undefined, diagnostics: parsed.errors };
+  if (!parsed.ok) {
+    // Explicit inline manifests must fail fast on validation errors so the
+    // operator notices the bad manifest immediately, matching the syntax-error
+    // behavior. File-backed manifests stay diagnostics-only.
+    if (options.profilesJson) return { ok: false, errors: parsed.errors };
+    return { ok: true, profiles: undefined, diagnostics: parsed.errors };
+  }
   const inspected = inspectWorkerProfiles(parsed.value, catalog);
   return {
     ok: true,

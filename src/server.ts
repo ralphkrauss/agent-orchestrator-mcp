@@ -16,7 +16,7 @@ import { getPackageVersion } from './packageMetadata.js';
 import { ipcTimeoutForTool } from './toolTimeout.js';
 import { tools } from './mcpTools.js';
 import { createNotificationPushTick, parseNotificationPollIntervalMs } from './notificationPushPoller.js';
-import { enforceWritableProfilesPolicy } from './serverPolicy.js';
+import { enforceWritableProfilesPolicy, harnessPolicyContext } from './serverPolicy.js';
 
 const paths = daemonPaths();
 const client = new IpcClient(paths.ipc.path);
@@ -45,7 +45,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (policyError) {
       return { content: [{ type: 'text', text: JSON.stringify(wrapErr(policyError), null, 2) }] };
     }
-    const result = await client.request(tool.name, args, ipcTimeoutForTool(tool.name, args));
+    const result = await client.request(tool.name, args, {
+      timeoutMs: ipcTimeoutForTool(tool.name, args),
+      policyContext: harnessPolicyContext(tool.name),
+    });
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   } catch (error) {
     if (error instanceof IpcRequestError) {

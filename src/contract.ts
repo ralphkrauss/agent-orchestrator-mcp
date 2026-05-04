@@ -679,12 +679,24 @@ export const RpcMethodSchema = z.enum([
 ]);
 export type RpcMethod = z.infer<typeof RpcMethodSchema>;
 
+export const RpcPolicyContextSchema = z.object({
+  /**
+   * Per-request writable profiles policy. When set, the daemon-side
+   * upsert_worker_profile primitive must reject any request whose resolved
+   * profiles_file does not match this absolute path. Generic clients without
+   * this field keep current behavior.
+   */
+  writable_profiles_file: z.string().min(1).optional(),
+}).optional();
+export type RpcPolicyContext = z.infer<typeof RpcPolicyContextSchema>;
+
 export const RpcRequestSchema = z.object({
   protocol_version: z.literal(PROTOCOL_VERSION),
   frontend_version: z.string().min(1).optional(),
   id: z.string(),
   method: RpcMethodSchema,
   params: z.unknown().optional(),
+  policy_context: RpcPolicyContextSchema,
 });
 export type RpcRequest = z.infer<typeof RpcRequestSchema>;
 

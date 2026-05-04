@@ -31,6 +31,7 @@ import {
   type ReasoningEffort,
   type ModelSource,
   type OrchestratorError,
+  type RpcPolicyContext,
   type StartRun,
   type RunStatus,
   type RunModelSettings,
@@ -87,6 +88,7 @@ type OrchestratorLogger = (message: string) => void;
 
 export interface OrchestratorDispatchContext {
   frontend_version?: string | null;
+  policy_context?: RpcPolicyContext | null;
 }
 
 interface ResolvedStartRunTarget {
@@ -101,6 +103,7 @@ interface ResolvedStartRunTarget {
 export class OrchestratorService {
   private readonly activeRuns = new Map<string, RuntimeRunHandle>();
   private readonly timers = new Map<string, NodeJS.Timeout>();
+  private readonly profileUpdateLocks = new Map<string, Promise<void>>();
   private config: OrchestratorConfig = defaultConfig;
   private shuttingDown = false;
 
@@ -129,7 +132,7 @@ export class OrchestratorService {
       case 'list_worker_profiles':
         return this.listWorkerProfiles(params);
       case 'upsert_worker_profile':
-        return this.upsertWorkerProfile(params);
+        return this.upsertWorkerProfile(params, context);
       case 'list_runs':
         return wrapOk({ runs: await this.store.listRuns() });
       case 'get_run_status':
@@ -316,11 +319,17 @@ export class OrchestratorService {
     });
   }
 
-  async upsertWorkerProfile(params: unknown): Promise<ToolResult> {
+  async upsertWorkerProfile(params: unknown, context: OrchestratorDispatchContext = {}): Promise<ToolResult> {
     const parsed = UpsertWorkerProfileInputSchema.safeParse(params);
     if (!parsed.success) return invalidInput(parsed.error.message);
     const input = parsed.data;
     const profilesFile = resolveWorkerProfilesFile(input.profiles_file, input.cwd);
+    const policyError = enforcePolicyContextForUpsert(profilesFile, context.policy_context, input.cwd);
+    if (policyError) return wrapErr(policyError);
+    return await this.withProfileUpdateLock(profilesFile, () => this.upsertWorkerProfileLocked(input, profilesFile));
+  }
+
+  private async upsertWorkerProfileLocked(input: UpsertWorkerProfile, profilesFile: string): Promise<ToolResult> {
     const loaded = await readWorkerProfileManifestForUpdate(profilesFile);
     if (!loaded.ok) return wrapErr(loaded.error);
     const previous = loaded.manifest.profiles[input.profile] ?? null;
@@ -369,6 +378,27 @@ export class OrchestratorService {
       invalid_profiles: invalidProfileList(inspected),
       diagnostics: inspected.errors,
     });
+  }
+
+  /**
+   * Serialize per-manifest read/validate/write so concurrent upserts to the
+   * same profiles file cannot race and clobber unrelated profile changes.
+   */
+  private async withProfileUpdateLock<T>(profilesFile: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.profileUpdateLocks.get(profilesFile) ?? Promise.resolve();
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.then(() => released);
+    this.profileUpdateLocks.set(profilesFile, tail);
+    try {
+      await previous;
+      return await fn();
+    } finally {
+      release();
+      if (this.profileUpdateLocks.get(profilesFile) === tail) {
+        this.profileUpdateLocks.delete(profilesFile);
+      }
+    }
   }
 
   private async loadLiveWorkerProfiles(profilesFile: string): ReturnType<typeof loadInspectedWorkerProfilesFromFile> {
@@ -966,6 +996,22 @@ function preSpawnError(backend: Backend, message: string, context: Record<string
     fatal: true,
     context,
   };
+}
+
+function enforcePolicyContextForUpsert(
+  resolvedProfilesFile: string,
+  policyContext: RpcPolicyContext | null | undefined,
+  requestCwd: string | undefined,
+): OrchestratorError | null {
+  const allowed = policyContext?.writable_profiles_file;
+  if (!allowed) return null;
+  const resolvedAllowed = resolveWorkerProfilesFile(allowed, requestCwd);
+  if (resolvedAllowed === resolvedProfilesFile) return null;
+  return orchestratorError(
+    'INVALID_INPUT',
+    `upsert_worker_profile is restricted to the harness-pinned profiles manifest (${resolvedAllowed}); refusing to write ${resolvedProfilesFile}`,
+    { profiles_file: resolvedProfilesFile, allowed_profiles_file: resolvedAllowed },
+  );
 }
 
 async function readWorkerProfileManifestForUpdate(

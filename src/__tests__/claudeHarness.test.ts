@@ -21,7 +21,7 @@ import {
   buildClaudeHarnessConfig,
   stringifyClaudeMcpConfig,
 } from '../claude/config.js';
-import { buildClaudeEnvelope, buildClaudeSpawnArgs, parseClaudeLauncherArgs } from '../claude/launcher.js';
+import { buildClaudeEnvelope, buildClaudeSpawnArgs, parseClaudeLauncherArgs, runClaudeLauncher } from '../claude/launcher.js';
 import { createWorkerCapabilityCatalog } from '../harness/capabilities.js';
 
 describe('Claude harness permission and allowlist', () => {
@@ -33,13 +33,15 @@ describe('Claude harness permission and allowlist', () => {
   it('built-in tool surface includes read-only inspection, the pinned Bash monitor, Skill, and MCP tools', () => {
     const monitorPin = resolveMonitorPin({ AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' });
     const allow = buildClaudeAllowedToolsList({
-      monitorBashAllowlistPattern: monitorPin.bash_allowlist_pattern,
+      monitorBashAllowPatterns: monitorPin.monitor_bash_allow_patterns,
     });
     assert.deepStrictEqual([...CLAUDE_SUPERVISOR_BUILTIN_TOOLS], ['Read', 'Glob', 'Grep', 'Bash', 'Skill']);
     assert.ok(allow.includes('Read'));
     assert.ok(allow.includes('Glob'));
     assert.ok(allow.includes('Grep'));
-    assert.ok(allow.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor *)`));
+    assert.ok(allow.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line)`));
+    assert.ok(allow.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line --since *)`));
+    assert.equal(allow.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor *)`), false, 'broad monitor * pattern must be replaced by explicit argv shapes');
     // Positive Bash inspection allowlist: pwd and git status are the only
     // non-monitor commands the supervisor is permitted to run. Other
     // read-only commands such as `git log`, `cat`, `ls`, etc. are deliberately
@@ -69,7 +71,7 @@ describe('Claude harness permission and allowlist', () => {
   it('builds settings that allow read-only inspection, the pinned monitor, Skill, and safe MCP tools while denying editing surfaces', () => {
     const monitorPin = resolveMonitorPin({ AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' });
     const settings = buildClaudeSupervisorSettings({
-      monitorBashAllowlistPattern: monitorPin.bash_allowlist_pattern,
+      monitorBashAllowPatterns: monitorPin.monitor_bash_allow_patterns,
     });
     assert.deepStrictEqual(
       [...settings.permissions.allow].sort(),
@@ -77,7 +79,8 @@ describe('Claude harness permission and allowlist', () => {
         'Read',
         'Glob',
         'Grep',
-        `Bash(${process.execPath} /opt/agent-orchestrator monitor *)`,
+        `Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line)`,
+        `Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line --since *)`,
         'Bash(pwd)',
         'Bash(git status)',
         'Bash(git status *)',
@@ -166,6 +169,59 @@ describe('Claude harness permission and allowlist', () => {
     );
     assert.throws(() => buildMonitorBashCommand(monitorPin, '01KQRTVEP1Y0ANFYCSXZJ2FHPZ;touch /tmp/x'));
     assert.throws(() => buildMonitorBashCommand(monitorPin, '01KQRTVEP1Y0ANFYCSXZJ2FHPZ', true, 'bad;cursor'));
+  });
+
+  it('POSIX-quotes monitor command tokens that contain spaces or parentheses', () => {
+    const pin = resolveMonitorPin({ AGENT_ORCHESTRATOR_BIN: '/opt/agent orchestrator (1)/cli.js' });
+    // The bin contains a space and parentheses, so it must be single-quoted in
+    // both the command_prefix_string used in prompts and in the explicit Bash
+    // allow patterns derived from it. Spaces and parens are not in the
+    // supervisor's Bash deny list, so the allow rule remains effective.
+    assert.ok(pin.command_prefix_string.includes(`'/opt/agent orchestrator (1)/cli.js'`));
+    for (const pattern of pin.monitor_bash_allow_patterns) {
+      assert.ok(pattern.startsWith('Bash('));
+      assert.ok(pattern.includes(`'/opt/agent orchestrator (1)/cli.js'`));
+    }
+    assert.equal(
+      buildMonitorBashCommand(pin, '01KQRTVEP1Y0ANFYCSXZJ2FHPZ'),
+      `${pin.command_prefix_string} monitor 01KQRTVEP1Y0ANFYCSXZJ2FHPZ --json-line`,
+    );
+  });
+
+  it('rejects monitor paths that would survive POSIX quoting and be shadowed by the Bash deny list', () => {
+    // Each of these characters is denied by `Bash(*<char>*)` regardless of
+    // context, so a path containing them — even when single-quoted — would
+    // produce an allow pattern the deny list would shadow. The single quote in
+    // particular is unsafe because POSIX quoting transforms it to `'\''`,
+    // which contains a backslash and matches `Bash(*\\*)`. resolveMonitorPin
+    // must fail fast with an actionable error rather than emit an allow rule
+    // that silently does not match the spawned monitor command.
+    for (const unsafeBin of [
+      `/opt/o'q/cli.js`,    // single quote -> `'\''` -> contains `\`
+      '/opt/a;b/cli.js',    // semicolon -> Bash(*;*) deny
+      '/opt/a&b/cli.js',    // ampersand -> Bash(*&*) deny
+      '/opt/a|b/cli.js',    // pipe      -> Bash(*|*) deny
+      '/opt/a$b/cli.js',    // dollar    -> Bash(*$*) deny
+      '/opt/a`b/cli.js',    // backtick  -> Bash(*`*) deny
+      '/opt/a\\b/cli.js',   // backslash -> Bash(*\\*) deny
+      '/opt/a<b/cli.js',    // redirect  -> Bash(*<*) deny
+      '/opt/a>b/cli.js',    // redirect  -> Bash(*>*) deny
+      '/opt/a\nb/cli.js',   // newline   -> Bash(*\n*) deny
+    ]) {
+      assert.throws(
+        () => resolveMonitorPin({ AGENT_ORCHESTRATOR_BIN: unsafeBin }),
+        /Bash deny list would shadow|Reinstall agent-orchestrator/,
+        `expected resolveMonitorPin to reject ${JSON.stringify(unsafeBin)}`,
+      );
+    }
+  });
+
+  it('exposes explicit monitor argv shapes (no broad monitor *) in monitor_bash_allow_patterns', () => {
+    const pin = resolveMonitorPin({ AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' });
+    assert.deepStrictEqual(pin.monitor_bash_allow_patterns, [
+      `Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line)`,
+      `Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line --since *)`,
+    ]);
   });
 });
 
@@ -278,6 +334,81 @@ describe('Claude skill curation', () => {
     assert.match(await readFile(join(targetRoot, 'review', 'SKILL.md'), 'utf8'), /review/);
     await assert.rejects(() => readFile(join(targetRoot, 'bad', 'SKILL.md'), 'utf8'));
   });
+
+  it('re-validates SKILL.md at the copy/read boundary and refuses files swapped to a symlink after discovery', async () => {
+    const sourceRoot = await mkdtemp(join(tmpdir(), 'agent-claude-skill-tocttou-'));
+    await mkdir(join(sourceRoot, 'orchestrate-good'), { recursive: true });
+    const goodSkillFile = join(sourceRoot, 'orchestrate-good', 'SKILL.md');
+    await writeFile(goodSkillFile, '---\nname: orchestrate-good\n---\nlegitimate body');
+    // Drop in another regular-file skill that will be swapped to a symlink
+    // after listClaudeSkills has run.
+    await mkdir(join(sourceRoot, 'orchestrate-evil'), { recursive: true });
+    const evilSkillFile = join(sourceRoot, 'orchestrate-evil', 'SKILL.md');
+    await writeFile(evilSkillFile, '---\nname: orchestrate-evil\n---\nplaceholder');
+    const sensitiveFile = join(sourceRoot, '..', 'tocttou-secret.txt');
+    await writeFile(sensitiveFile, 'do-not-curate');
+
+    // Discovery sees both as regular files.
+    const listed = await listOrchestrationSkills(sourceRoot);
+    assert.deepStrictEqual(listed, ['orchestrate-evil', 'orchestrate-good']);
+
+    // Swap the evil skill to a symlink that points outside the source root.
+    const { rm: rmFile, symlink: symlinkAsync } = await import('node:fs/promises');
+    await rmFile(evilSkillFile);
+    await symlinkAsync(sensitiveFile, evilSkillFile);
+
+    const ephemeral = await mkdtemp(join(tmpdir(), 'agent-claude-skill-tocttou-out-'));
+    const result = await curateOrchestrateSkills({ sourceSkillRoot: sourceRoot, ephemeralSkillRoot: ephemeral });
+    assert.deepStrictEqual(result.orchestrationSkillNames, ['orchestrate-good']);
+    await assert.rejects(() => readFile(join(ephemeral, 'orchestrate-evil', 'SKILL.md'), 'utf8'));
+    for (const skill of result.orchestrationSkills) {
+      assert.equal(skill.name, 'orchestrate-good');
+      assert.doesNotMatch(skill.content, /do-not-curate/);
+    }
+  });
+
+  it('propagates unexpected I/O errors during skill re-validation rather than silently dropping required orchestrate-* skills', async () => {
+    if (process.getuid?.() === 0) return; // root bypasses permission bits; skip
+    const sourceRoot = await mkdtemp(join(tmpdir(), 'agent-claude-skill-eacces-'));
+    await mkdir(join(sourceRoot, 'orchestrate-good'), { recursive: true });
+    const skillFile = join(sourceRoot, 'orchestrate-good', 'SKILL.md');
+    await writeFile(skillFile, '---\nname: orchestrate-good\n---\nbody');
+    const { chmod } = await import('node:fs/promises');
+    await chmod(skillFile, 0o000);
+    const ephemeral = await mkdtemp(join(tmpdir(), 'agent-claude-skill-eacces-out-'));
+    try {
+      await assert.rejects(
+        () => curateOrchestrateSkills({ sourceSkillRoot: sourceRoot, ephemeralSkillRoot: ephemeral }),
+        (error: NodeJS.ErrnoException) => error.code === 'EACCES' || error.code === 'EPERM',
+        'unexpected open(...) errors must surface, not silently drop the skill',
+      );
+    } finally {
+      await chmod(skillFile, 0o600);
+    }
+  });
+
+  it('rejects unsafe skill directory names (newlines, control characters, leading punctuation) before they enter the prompt or skill mirror', async () => {
+    const sourceRoot = await mkdtemp(join(tmpdir(), 'agent-claude-unsafe-skills-'));
+    await mkdir(join(sourceRoot, 'orchestrate-good'), { recursive: true });
+    await writeFile(join(sourceRoot, 'orchestrate-good', 'SKILL.md'), '---\nname: orchestrate-good\n---\nbody');
+    // Names with newlines, control characters, or path-shaped prefixes are
+    // skipped so they cannot inject prompt lines or escape the skill root.
+    for (const unsafeName of ['orchestrate-bad\nNew-Section', 'orchestrate\tname', '.hidden-skill', '-leading-dash', 'has space']) {
+      await mkdir(join(sourceRoot, unsafeName), { recursive: true });
+      await writeFile(join(sourceRoot, unsafeName, 'SKILL.md'), '---\nname: x\n---\n');
+    }
+
+    const listed = await listOrchestrationSkills(sourceRoot);
+    assert.deepStrictEqual(listed, ['orchestrate-good']);
+
+    const ephemeral = await mkdtemp(join(tmpdir(), 'agent-claude-unsafe-skills-out-'));
+    const result = await curateOrchestrateSkills({ sourceSkillRoot: sourceRoot, ephemeralSkillRoot: ephemeral });
+    assert.deepStrictEqual(result.orchestrationSkillNames, ['orchestrate-good']);
+
+    const targetRoot = await mkdtemp(join(tmpdir(), 'agent-claude-unsafe-mirror-'));
+    const mirror = await mirrorClaudeProjectSkills({ sourceSkillRoot: sourceRoot, targetSkillRoot: targetRoot });
+    assert.deepStrictEqual(mirror.skillNames, ['orchestrate-good']);
+  });
 });
 
 describe('Claude harness config builder', () => {
@@ -373,7 +504,9 @@ describe('Claude launcher envelope', () => {
       assert.equal(settings.enableAllProjectMcpServers, false);
       assert.ok(Array.isArray(settings.permissions.allow));
       assert.equal(settings.permissions.defaultMode, 'dontAsk');
-      assert.ok(settings.permissions.allow.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor *)`));
+      assert.ok(settings.permissions.allow.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line)`));
+      assert.ok(settings.permissions.allow.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line --since *)`));
+      assert.equal(settings.permissions.allow.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor *)`), false, 'broad monitor * pattern must be replaced by explicit argv shapes');
       assert.ok(settings.permissions.allow.includes('Skill'));
       assert.ok(settings.permissions.allow.includes('Read'));
       assert.ok(settings.permissions.allow.includes('Glob'));
@@ -407,7 +540,9 @@ describe('Claude launcher envelope', () => {
       assert.ok(allowedTokens.includes('Read'));
       assert.ok(allowedTokens.includes('Glob'));
       assert.ok(allowedTokens.includes('Grep'));
-      assert.ok(allowedTokens.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor *)`));
+      assert.ok(allowedTokens.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line)`));
+      assert.ok(allowedTokens.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line --since *)`));
+      assert.equal(allowedTokens.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor *)`), false);
       assert.ok(allowedTokens.includes('Skill'));
       assert.ok(allowedTokens.includes('mcp__agent-orchestrator__start_run'));
       assert.ok(allowedTokens.includes('mcp__agent-orchestrator__upsert_worker_profile'));
@@ -497,6 +632,24 @@ describe('Claude launcher envelope', () => {
     } finally {
       await built.cleanup();
     }
+  });
+
+  it('rejects inline --profiles-json that fails manifest validation (matches the syntax-error fail-fast behavior)', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'agent-claude-bad-inline-manifest-'));
+    // Manifest schema is strict; an unknown top-level field triggers
+    // parseWorkerProfileManifest to reject the manifest.
+    const badManifest = JSON.stringify({ version: 1, profiles: {}, unexpected: true });
+    let stderr = '';
+    const code = await runClaudeLauncher(
+      ['--cwd', cwd, '--profiles-json', badManifest, '--print-config'],
+      {
+        stdout: { write: () => true } as unknown as NodeJS.WritableStream,
+        stderr: { write: (chunk: string | Uint8Array) => { stderr += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'); return true; } } as unknown as NodeJS.WritableStream,
+        env: { AGENT_ORCHESTRATOR_HOME: join(cwd, 'home') },
+      },
+    );
+    assert.equal(code, 1, 'inline manifest validation errors must fail fast');
+    assert.notEqual(stderr, '', 'expected an error message on stderr');
   });
 
   it('buildClaudeSpawnArgs sets the canonical isolation flags, comma-joined --allowed-tools, and deny-by-default mode', () => {
@@ -598,7 +751,9 @@ describe('Claude launcher leak-proof tests', () => {
       assert.ok(built.spawnArgs.includes('--allowed-tools'));
       const allowedValue = built.spawnArgs[built.spawnArgs.indexOf('--allowed-tools') + 1] ?? '';
       const allowedTokens = allowedValue.split(',');
-      assert.ok(allowedTokens.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor *)`));
+      assert.ok(allowedTokens.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line)`));
+      assert.ok(allowedTokens.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line --since *)`));
+      assert.equal(allowedTokens.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor *)`), false);
       assert.ok(allowedTokens.includes('Skill'));
       assert.ok(allowedTokens.includes('Read'));
       assert.ok(allowedTokens.includes('Glob'));
@@ -657,7 +812,9 @@ describe('Claude launcher leak-proof tests', () => {
       const toolsValue = built.spawnArgs[built.spawnArgs.indexOf('--tools') + 1] ?? '';
       const allowedValue = built.spawnArgs[built.spawnArgs.indexOf('--allowed-tools') + 1] ?? '';
       assert.equal(toolsValue, 'Read,Glob,Grep,Bash,Skill');
-      assert.ok(allowedValue.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor *)`));
+      assert.ok(allowedValue.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line)`));
+      assert.ok(allowedValue.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line --since *)`));
+      assert.equal(allowedValue.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor *)`), false);
       assert.ok(allowedValue.split(',').includes('Read'));
       assert.ok(allowedValue.split(',').includes('Glob'));
       assert.ok(allowedValue.split(',').includes('Grep'));
@@ -672,7 +829,8 @@ describe('Claude launcher leak-proof tests', () => {
       assert.deepStrictEqual(
         bashAllow,
         [
-          `Bash(${process.execPath} /opt/agent-orchestrator monitor *)`,
+          `Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line)`,
+          `Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line --since *)`,
           'Bash(git status)',
           'Bash(git status *)',
           'Bash(pwd)',

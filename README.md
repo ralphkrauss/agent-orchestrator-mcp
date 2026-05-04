@@ -350,10 +350,11 @@ The spawn passes:
 - `--tools "Read,Glob,Grep,Bash,Skill"` so the only available built-in tools
   are read-only workspace inspection, the pinned monitor command surface, and
   Claude's skill loader.
-- `--allowed-tools "Read,Glob,Grep,Bash(<node> <cli> monitor *),Bash(pwd),Bash(git status),Bash(git status *),Skill,mcp__agent-orchestrator__..."`
+- `--allowed-tools "Read,Glob,Grep,Bash(<node> <cli> monitor * --json-line),Bash(<node> <cli> monitor * --json-line --since *),Bash(pwd),Bash(git status),Bash(git status *),Skill,mcp__agent-orchestrator__..."`
   (comma-joined) and `--permission-mode dontAsk` pre-approve only read-only
-  inspection, the four-pattern Bash allowlist (the pinned `agent-orchestrator
-  monitor <run_id> --json-line` wake path plus `pwd`, `git status`, and
+  inspection, the explicit Bash allowlist (two pinned monitor argv shapes:
+  `agent-orchestrator monitor <run_id> --json-line` and the cursored variant
+  `... --json-line --since <notification_id>`, plus `pwd`, `git status`, and
   `git status *`), the skill surface, and the Claude-specific safe subset of
   agent-orchestrator MCP tools. Anything else (including `git log`, `cat`,
   `ls`, `head`, `tail`, `grep`, `find`, `jq`, `git diff`, `git show`,
@@ -401,7 +402,9 @@ restricted supervisor launch.)
 
 The supervisor's tool surface is `Read`, `Glob`, `Grep`, `Bash`, the `Skill`
 tool, and the Claude-specific agent-orchestrator MCP allowlist. The Bash
-allowlist contains exactly four patterns: the pinned monitor command,
+allowlist contains exactly five patterns: two explicit pinned monitor argv
+shapes (`Bash(<command-prefix> monitor * --json-line)` and the cursored
+`Bash(<command-prefix> monitor * --json-line --since *)`),
 `Bash(pwd)`, `Bash(git status)`, and `Bash(git status *)`. Other read-only
 commands such as `cat`, `ls`, `head`, `tail`, `grep`, `find`, `jq`, `git log`,
 `git diff`, `git show`, `git rev-parse`, and `git branch` are not in the
@@ -646,13 +649,14 @@ events are explicitly needed, with a small `limit` and an `after_sequence`
 cursor.
 
 The `agent-orchestrator monitor <run_id>` CLI is a one-shot notification bridge
-intended for non-Claude clients (e.g. external monitoring tools and user
-shells). The Claude Code supervisor no longer uses this CLI; it waits via the
-MCP notification surface instead. The CLI blocks against the daemon, prints
-exactly one JSON line when a terminal or fatal-error notification arrives,
-and exits with a documented code: `0` completed, `1` failed/orphaned, `2`
-cancelled, `3` timed_out, `10` fatal_error, `4` unknown run, `5` daemon
-unavailable, `6` argument error.
+that blocks against the daemon, prints exactly one JSON line when a terminal or
+fatal-error notification arrives, and exits with a documented code: `0`
+completed, `1` failed/orphaned, `2` cancelled, `3` timed_out, `10` fatal_error,
+`4` unknown run, `5` daemon unavailable, `6` argument error. The Claude Code
+supervisor uses this CLI as its current-turn wake path through a pinned
+background Bash invocation and reconciles cross-turn with
+`list_run_notifications`. OpenCode and other notification-aware MCP clients use
+`wait_for_any_run` for the same wake purpose.
 
 Most worker preparation failures are run failures rather than envelope failures. For example, if `codex` is missing, `start_run` creates a durable run and that run lands in `failed` with `WORKER_BINARY_MISSING` details.
 

@@ -50,7 +50,7 @@ export interface ClaudeHarnessConfig {
 
 export function buildClaudeHarnessConfig(input: ClaudeHarnessConfigInput): ClaudeHarnessConfig {
   const settings = buildClaudeSupervisorSettings({
-    monitorBashAllowlistPattern: input.monitorPin.bash_allowlist_pattern,
+    monitorBashAllowPatterns: input.monitorPin.monitor_bash_allow_patterns,
   });
   const mcpConfig: ClaudeMcpConfig = {
     mcpServers: {
@@ -101,7 +101,7 @@ function buildSupervisorSystemPrompt(input: ClaudeHarnessConfigInput): string {
     '- For orchestration workflows, prefer project-owned orchestrate-* skills. Do not use skills that would require unavailable editing, shell, external-service, or non-agent-orchestrator MCP access.',
     '- Project-owned orchestrate-* workflow instructions are also embedded in this system prompt below so the supervisor can follow them even when slash UI is not inspected.',
     `- Permitted built-in tools: ${[...CLAUDE_SUPERVISOR_BUILTIN_TOOLS].join(', ')}, plus the agent-orchestrator MCP tools listed below.`,
-    `- Bash is restricted by an explicit allowlist. The only Bash patterns that will run are: Bash(${monitorPin.bash_allowlist_pattern}), Bash(pwd), Bash(git status), and Bash(git status *). Anything else, including read-only commands such as cat, ls, head, tail, grep, find, jq, git log, git diff, git show, git rev-parse, and git branch, will be denied.`,
+    `- Bash is restricted by an explicit allowlist. The only Bash patterns that will run are: ${monitorPin.monitor_bash_allow_patterns.join(', ')}, Bash(pwd), Bash(git status), and Bash(git status *). Anything else, including read-only commands such as cat, ls, head, tail, grep, find, jq, git log, git diff, git show, git rev-parse, and git branch, will be denied.`,
     '- Do not attempt to run other shell commands. Use Read for file contents, Glob for file discovery, Grep for content search, and the agent-orchestrator MCP tools for daemon, worker, and notification state. Worker runs are the only way to make changes to the target workspace.',
     '- Edit, Write, WebFetch, WebSearch, Task, NotebookEdit, and TodoWrite are not available. Do not request them.',
     '- The supervisor must not directly modify files in the target workspace. To modify the target workspace, dispatch a worker run via mcp__agent-orchestrator__start_run with cwd set to the target workspace; the worker has full access in its own session.',

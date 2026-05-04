@@ -1,4 +1,4 @@
-import { orchestratorError, type OrchestratorError } from './contract.js';
+import { orchestratorError, type OrchestratorError, type RpcPolicyContext } from './contract.js';
 import { resolveWorkerProfilesFile } from './workerRouting.js';
 
 /**
@@ -8,6 +8,27 @@ import { resolveWorkerProfilesFile } from './workerRouting.js';
  * supervisor from using upsert_worker_profile as a generic file-write
  * primitive against arbitrary locations.
  */
+/**
+ * Build the per-request IPC policy context the MCP frontend should attach to
+ * tool calls. When the harness pins a writable profiles manifest path,
+ * upsert_worker_profile carries the resolved pin through IPC so the daemon
+ * write primitive enforces it as defense in depth, in addition to the
+ * frontend's own pre-IPC check. The pin is resolved against the frontend's cwd
+ * here so that frontend and daemon agree on the canonical path even when the
+ * env value is a relative path. Tool calls without a relevant pin return
+ * undefined so generic local clients keep current behavior.
+ */
+export function harnessPolicyContext(
+  toolName: string,
+  env: NodeJS.ProcessEnv = process.env,
+  cwd: string = process.cwd(),
+): RpcPolicyContext | undefined {
+  if (toolName !== 'upsert_worker_profile') return undefined;
+  const pinned = env.AGENT_ORCHESTRATOR_WRITABLE_PROFILES_FILE;
+  if (!pinned) return undefined;
+  return { writable_profiles_file: resolveWorkerProfilesFile(pinned, cwd, env) };
+}
+
 export function enforceWritableProfilesPolicy(
   toolName: string,
   args: unknown,

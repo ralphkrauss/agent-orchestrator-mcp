@@ -241,7 +241,13 @@ async function loadProfilesForLaunch(
   }
 
   const parsed = parseWorkerProfileManifest(raw.value);
-  if (!parsed.ok) return { ok: true, profiles: undefined, diagnostics: parsed.errors };
+  if (!parsed.ok) {
+    // Explicit inline manifests must fail fast on validation errors so the
+    // operator notices the bad manifest immediately, matching the syntax-error
+    // behavior. File-backed manifests stay diagnostics-only.
+    if (options.profilesJson) return { ok: false, errors: parsed.errors };
+    return { ok: true, profiles: undefined, diagnostics: parsed.errors };
+  }
   const inspected = inspectWorkerProfiles(parsed.value, catalog);
   return {
     ok: true,

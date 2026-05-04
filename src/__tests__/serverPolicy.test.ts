@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { enforceWritableProfilesPolicy } from '../serverPolicy.js';
+import { enforceWritableProfilesPolicy, harnessPolicyContext } from '../serverPolicy.js';
 
 describe('enforceWritableProfilesPolicy', () => {
   it('returns null when the env pin is not set so non-Claude clients are unaffected', () => {
@@ -78,5 +78,36 @@ describe('enforceWritableProfilesPolicy', () => {
       '/repo',
     );
     assert.equal(result, null, 'relative pin should resolve against the supplied cwd');
+  });
+});
+
+describe('harnessPolicyContext', () => {
+  it('returns undefined when the env pin is not set so generic clients send no policy context', () => {
+    assert.equal(harnessPolicyContext('upsert_worker_profile', { HOME: '/h' }), undefined);
+  });
+
+  it('returns undefined for unrelated tools even when the pin is set', () => {
+    assert.equal(
+      harnessPolicyContext('list_worker_profiles', { AGENT_ORCHESTRATOR_WRITABLE_PROFILES_FILE: '/state/profiles.json' }),
+      undefined,
+    );
+  });
+
+  it('exposes the pinned writable profiles file for upsert_worker_profile when the pin is set', () => {
+    assert.deepStrictEqual(
+      harnessPolicyContext('upsert_worker_profile', { AGENT_ORCHESTRATOR_WRITABLE_PROFILES_FILE: '/state/profiles.json' }),
+      { writable_profiles_file: '/state/profiles.json' },
+    );
+  });
+
+  it('resolves a relative pin against the supplied cwd so frontend and daemon agree on the canonical path', () => {
+    assert.deepStrictEqual(
+      harnessPolicyContext(
+        'upsert_worker_profile',
+        { AGENT_ORCHESTRATOR_WRITABLE_PROFILES_FILE: 'profiles.json' },
+        '/repo',
+      ),
+      { writable_profiles_file: '/repo/profiles.json' },
+    );
   });
 });
