@@ -128,6 +128,67 @@ describe('OpenCode worker capability profiles', () => {
     assert.ok(!result.ok && result.errors.some((error) => error.includes('profile unknownEffort: Claude reasoning_effort must be one of low, medium, high, xhigh, or max')));
   });
 
+  it('accepts a minimal cursor profile', () => {
+    const manifest = parseWorkerProfileManifest({
+      profiles: {
+        cursorOk: {
+          backend: 'cursor',
+          model: 'composer-2',
+        },
+      },
+    });
+    assert.equal(manifest.ok, true);
+
+    const result = validateWorkerProfiles(
+      manifest.ok ? manifest.value : assert.fail('manifest parse failed'),
+      createWorkerCapabilityCatalog(),
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.ok && result.value.profiles.cursorOk?.backend, 'cursor');
+    assert.equal(result.ok && result.value.profiles.cursorOk?.model, 'composer-2');
+  });
+
+  it('accepts cursor profiles that pass model only and rejects unsupported settings', () => {
+    const manifest = parseWorkerProfileManifest({
+      profiles: {
+        cursorOk: {
+          backend: 'cursor',
+          model: 'composer-2',
+        },
+        cursorBadEffort: {
+          backend: 'cursor',
+          model: 'composer-2',
+          reasoning_effort: 'high',
+        },
+        cursorMissingModel: {
+          backend: 'cursor',
+        },
+      },
+    });
+    assert.equal(manifest.ok, true);
+
+    const result = validateWorkerProfiles(
+      manifest.ok ? manifest.value : assert.fail('manifest parse failed'),
+      createWorkerCapabilityCatalog(),
+    );
+
+    assert.equal(result.ok, false);
+    assert.ok(!result.ok && result.errors.some((error) => error.includes('cursorBadEffort uses unsupported reasoning_effort high')));
+    assert.ok(!result.ok && result.errors.some((error) => error.includes('cursorMissingModel requires an explicit model')));
+  });
+
+  it('reports cursor capability metadata in the catalog', () => {
+    const catalog = createWorkerCapabilityCatalog();
+    const cursor = catalog.backends.find((backend) => backend.backend === 'cursor');
+    assert.ok(cursor, 'cursor capability is missing from catalog');
+    assert.equal(cursor.requires_model, true);
+    assert.deepStrictEqual(cursor.settings.reasoning_efforts, []);
+    assert.deepStrictEqual(cursor.settings.service_tiers, []);
+    assert.equal(cursor.supports_start, true);
+    assert.equal(cursor.supports_resume, true);
+  });
+
   it('accepts Claude Opus 4.7 one-million-token direct ids for xhigh effort', () => {
     const manifest = parseWorkerProfileManifest({
       profiles: {

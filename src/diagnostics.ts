@@ -4,6 +4,7 @@ import { constants } from 'node:fs';
 import { promisify } from 'node:util';
 import type { Backend, BackendDiagnostic, BackendStatusReport } from './contract.js';
 import { resolveBinary } from './backend/common.js';
+import { defaultCursorSdkAdapter, type CursorSdkAdapter } from './backend/cursor/sdk.js';
 import { daemonPaths } from './daemon/paths.js';
 import { prepareWorkerSpawn } from './processManager.js';
 import { getPackageVersion } from './packageMetadata.js';
@@ -16,6 +17,7 @@ export interface BackendStatusOptions {
   daemonVersion?: string | null;
   daemonPid?: number | null;
   platform?: NodeJS.Platform;
+  cursorSdkAdapter?: CursorSdkAdapter;
 }
 
 interface BackendCheckDefinition {
@@ -72,7 +74,10 @@ export async function getBackendStatus(options: BackendStatusOptions = {}): Prom
   const runStore = await checkRunStore(paths.home);
   const platform = options.platform ?? process.platform;
   const posixSupported = platform !== 'win32';
-  const backends = await Promise.all(definitions.map((definition) => diagnoseBackend(definition, platform)));
+  const cliBackends = await Promise.all(definitions.map((definition) => diagnoseBackend(definition, platform)));
+  const cursorAdapter = options.cursorSdkAdapter ?? defaultCursorSdkAdapter();
+  const cursorBackend = await diagnoseCursorBackend(cursorAdapter);
+  const backends = [...cliBackends, cursorBackend];
   const frontendVersion = options.frontendVersion ?? getPackageVersion();
   const daemonVersion = options.daemonVersion ?? null;
 
@@ -226,6 +231,49 @@ async function runCommand(binaryPath: string, args: string[], platform: NodeJS.P
         : output || err.message || `exit code ${err.code ?? 'unknown'}`,
     };
   }
+}
+
+async function diagnoseCursorBackend(adapter: CursorSdkAdapter): Promise<BackendDiagnostic> {
+  const moduleId = '@cursor/sdk';
+  const installHint = `Install ${moduleId} (it ships as an optional dependency); run \`pnpm add ${moduleId}\` or \`npm install ${moduleId}\`.`;
+  const authHint = 'Set CURSOR_API_KEY in the daemon environment (Cursor Dashboard → Integrations).';
+  const availability = await adapter.available();
+  const auth = process.env.CURSOR_API_KEY
+    ? { status: 'ready' as const, source: 'CURSOR_API_KEY' }
+    : { status: 'unknown' as const, hint: authHint };
+
+  if (!availability.ok) {
+    const resolvedPath = availability.modulePath ?? null;
+    const installed = resolvedPath !== null;
+    const failureHint = installed
+      ? `${moduleId} resolves at ${resolvedPath} but failed to import — usually a native dependency or Node version mismatch (for example a missing \`sqlite3\` prebuilt binding for the current Node ABI). Try \`pnpm rebuild ${moduleId}\` or reinstalling with native rebuilds (e.g. \`npm install --build-from-source ${moduleId}\`).`
+      : installHint;
+    return {
+      name: 'cursor',
+      binary: moduleId,
+      status: 'missing',
+      path: resolvedPath,
+      version: null,
+      auth,
+      checks: [{ name: `${moduleId} module resolvable`, ok: false, message: availability.reason }],
+      hints: [failureHint],
+    };
+  }
+
+  const checks = [{ name: `${moduleId} module resolvable`, ok: true, message: availability.modulePath ?? undefined }];
+  const status = auth.status === 'ready' ? 'available' : 'auth_unknown';
+  const hints: string[] = [];
+  if (auth.status !== 'ready') hints.push(authHint);
+  return {
+    name: 'cursor',
+    binary: moduleId,
+    status,
+    path: availability.modulePath,
+    version: null,
+    auth,
+    checks,
+    hints,
+  };
 }
 
 async function checkRunStore(path: string): Promise<BackendStatusReport['run_store']> {
