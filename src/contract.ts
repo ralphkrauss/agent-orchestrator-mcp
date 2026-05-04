@@ -371,6 +371,22 @@ export const ListWorkerProfilesInputSchema = z.object({
 export type ListWorkerProfilesInput = z.input<typeof ListWorkerProfilesInputSchema>;
 export type ListWorkerProfiles = z.output<typeof ListWorkerProfilesInputSchema>;
 
+export const UpsertWorkerProfileInputSchema = z.object({
+  profiles_file: z.string().trim().min(1).optional(),
+  cwd: z.string().min(1).optional(),
+  profile: WorkerProfileAliasSchema,
+  backend: BackendSchema,
+  model: z.string().trim().min(1).optional(),
+  variant: z.string().trim().min(1).optional(),
+  reasoning_effort: ReasoningEffortSchema.optional(),
+  service_tier: ServiceTierSchema.optional(),
+  description: z.string().trim().min(1).optional(),
+  metadata: z.record(z.unknown()).optional(),
+  create_if_missing: z.boolean().optional().default(true),
+});
+export type UpsertWorkerProfileInput = z.input<typeof UpsertWorkerProfileInputSchema>;
+export type UpsertWorkerProfile = z.output<typeof UpsertWorkerProfileInputSchema>;
+
 export const SendFollowupInputSchema = z.object({
   run_id: z.string().min(1),
   prompt: z.string().min(1),
@@ -646,6 +662,7 @@ export const RpcMethodSchema = z.enum([
   'prune_runs',
   'start_run',
   'list_worker_profiles',
+  'upsert_worker_profile',
   'list_runs',
   'get_run_status',
   'get_run_events',

@@ -218,11 +218,12 @@ describe('agent orchestrator integration with mock CLIs', () => {
     process.env.PATH = join(fixture.root, 'missing-bin');
 
     const listed = await service.listWorkerProfiles({ profiles_file: profilesFile, cwd: repo });
-    assert.equal(listed.ok, false);
-    assert.match(
-      listed.ok ? '' : listed.error.message,
-      /profile live-implementation uses unavailable backend codex \(missing\)/,
-    );
+    assert.equal(listed.ok, true);
+    const listedProfiles = listed as unknown as { invalid_profiles: Array<{ id: string; errors: string[] }>; profiles: unknown[]; diagnostics: string[] };
+    assert.deepStrictEqual(listedProfiles.profiles, []);
+    assert.equal(listedProfiles.invalid_profiles[0]?.id, 'live-implementation');
+    assert.ok(listedProfiles.invalid_profiles[0]?.errors.some((error) => /profile live-implementation uses unavailable backend codex \(missing\)/.test(error)));
+    assert.ok(listedProfiles.diagnostics.some((error) => /profile live-implementation uses unavailable backend codex \(missing\)/.test(error)));
 
     const start = await service.startRun({
       profile: 'live-implementation',
@@ -236,6 +237,119 @@ describe('agent orchestrator integration with mock CLIs', () => {
       /profile live-implementation uses unavailable backend codex \(missing\)/,
     );
     assert.deepStrictEqual(await service.store.listRuns(), []);
+  });
+
+  it('keeps valid live profiles usable when another profile is invalid', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+    const profilesFile = join(fixture.root, 'profiles.json');
+    await writeFile(profilesFile, JSON.stringify({
+      version: 1,
+      profiles: {
+        'live-implementation': {
+          backend: 'codex',
+          model: 'gpt-5.2',
+          reasoning_effort: 'high',
+        },
+        'broken-cursor': {
+          backend: 'cursor',
+          model: 'composer-2',
+          reasoning_effort: 'high',
+        },
+      },
+    }, null, 2));
+
+    const listed = await service.listWorkerProfiles({ profiles_file: profilesFile, cwd: repo });
+    assert.equal(listed.ok, true);
+    const payload = listed as unknown as {
+      profiles: Array<{ id: string; backend: string }>;
+      invalid_profiles: Array<{ id: string; errors: string[] }>;
+    };
+    assert.deepStrictEqual(payload.profiles.map((profile) => profile.id), ['live-implementation']);
+    assert.equal(payload.invalid_profiles[0]?.id, 'broken-cursor');
+    assert.ok(payload.invalid_profiles[0]?.errors.some((error) => /reasoning_effort/.test(error)));
+
+    const start = await service.startRun({
+      profile: 'live-implementation',
+      profiles_file: profilesFile,
+      prompt: 'hello despite invalid peer',
+      cwd: repo,
+    });
+    assert.equal(start.ok, true);
+    const runId = start.ok ? (start as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: runId, wait_seconds: 5 });
+
+    const broken = await service.startRun({
+      profile: 'broken-cursor',
+      profiles_file: profilesFile,
+      prompt: 'should not launch',
+      cwd: repo,
+    });
+    assertInvalidInput(broken, /Worker profile broken-cursor is invalid/);
+  });
+
+  it('upserts one worker profile through the daemon while preserving unrelated invalid profile diagnostics', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+    const profilesFile = join(fixture.root, 'profiles.json');
+    await writeFile(profilesFile, JSON.stringify({
+      version: 1,
+      profiles: {
+        implementation: {
+          backend: 'codex',
+          model: 'openai/gpt-5.2',
+          reasoning_effort: 'high',
+        },
+        unrelated: {
+          backend: 'cursor',
+          model: 'composer-2',
+          reasoning_effort: 'high',
+        },
+      },
+    }, null, 2));
+
+    const repaired = await service.upsertWorkerProfile({
+      profiles_file: profilesFile,
+      cwd: repo,
+      profile: 'implementation',
+      backend: 'codex',
+      model: 'gpt-5.4',
+      reasoning_effort: 'medium',
+      description: 'Implementation worker',
+    });
+    assert.equal(repaired.ok, true);
+    const repairedPayload = repaired as unknown as {
+      profile: { id: string; model: string; reasoning_effort: string };
+      previous_profile: { model: string };
+      invalid_profiles: Array<{ id: string; errors: string[] }>;
+    };
+    assert.equal(repairedPayload.profile.id, 'implementation');
+    assert.equal(repairedPayload.profile.model, 'gpt-5.4');
+    assert.equal(repairedPayload.profile.reasoning_effort, 'medium');
+    assert.equal(repairedPayload.previous_profile.model, 'openai/gpt-5.2');
+    assert.equal(repairedPayload.invalid_profiles[0]?.id, 'unrelated');
+
+    const file = JSON.parse(await readFile(profilesFile, 'utf8')) as {
+      profiles: Record<string, Record<string, unknown>>;
+    };
+    assert.deepStrictEqual(file.profiles.implementation, {
+      backend: 'codex',
+      model: 'gpt-5.4',
+      reasoning_effort: 'medium',
+      description: 'Implementation worker',
+    });
+    assert.equal(file.profiles.unrelated?.reasoning_effort, 'high');
+
+    const listed = await service.listWorkerProfiles({ profiles_file: profilesFile, cwd: repo });
+    assert.equal(listed.ok, true);
+    const listedPayload = listed as unknown as {
+      profiles: Array<{ id: string; model: string }>;
+      invalid_profiles: Array<{ id: string }>;
+    };
+    assert.deepStrictEqual(listedPayload.profiles.map((profile) => profile.id), ['implementation']);
+    assert.equal(listedPayload.invalid_profiles[0]?.id, 'unrelated');
   });
 
   it('rejects model settings that a backend cannot apply', async () => {

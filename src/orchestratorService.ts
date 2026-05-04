@@ -1,5 +1,6 @@
-import { access, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
+import { dirname } from 'node:path';
 import {
   AckRunNotificationInputSchema,
   BackendSchema,
@@ -18,6 +19,7 @@ import {
   ShutdownInputSchema,
   StartRunInputSchema,
   ServiceTierSchema,
+  UpsertWorkerProfileInputSchema,
   WaitForAnyRunInputSchema,
   WaitForRunInputSchema,
   wrapErr,
@@ -36,6 +38,7 @@ import {
   type RunErrorCategory,
   type ServiceTier,
   type ToolResponse,
+  type UpsertWorkerProfile,
   type WorkerEvent,
   type WorkerResult,
 } from './contract.js';
@@ -44,10 +47,19 @@ import type { RuntimeRunHandle, WorkerRuntime } from './backend/runtime.js';
 import { getBackendStatus } from './diagnostics.js';
 import { captureGitSnapshot } from './gitSnapshot.js';
 import { buildObservabilitySnapshot } from './observability.js';
-import { createWorkerCapabilityCatalog, type ValidatedWorkerProfile } from './opencode/capabilities.js';
+import {
+  createWorkerCapabilityCatalog,
+  inspectWorkerProfiles,
+  parseWorkerProfileManifest,
+  type InspectedWorkerProfiles,
+  type InvalidWorkerProfile,
+  type ValidatedWorkerProfile,
+  type WorkerProfile,
+  type WorkerProfileManifest,
+} from './opencode/capabilities.js';
 import { getPackageVersion } from './packageMetadata.js';
 import { RunStore } from './runStore.js';
-import { loadValidatedWorkerProfilesFromFile, resolveWorkerProfilesFile } from './workerRouting.js';
+import { loadInspectedWorkerProfilesFromFile, resolveWorkerProfilesFile } from './workerRouting.js';
 
 interface OrchestratorConfig {
   default_idle_timeout_seconds: number;
@@ -116,6 +128,8 @@ export class OrchestratorService {
         return this.startRun(params);
       case 'list_worker_profiles':
         return this.listWorkerProfiles(params);
+      case 'upsert_worker_profile':
+        return this.upsertWorkerProfile(params);
       case 'list_runs':
         return wrapOk({ runs: await this.store.listRuns() });
       case 'get_run_status':
@@ -219,6 +233,17 @@ export class OrchestratorService {
 
     const profile = loaded.profiles.profiles[input.profile ?? ''];
     if (!profile) {
+      const invalidProfile = loaded.profiles.invalid_profiles[input.profile ?? ''];
+      if (invalidProfile) {
+        return {
+          ok: false,
+          error: orchestratorError('INVALID_INPUT', `Worker profile ${input.profile} is invalid: ${invalidProfile.errors.join('; ')}`, {
+            profile: input.profile,
+            profiles_file: profilesFile,
+            errors: invalidProfile.errors,
+          }),
+        };
+      }
       return {
         ok: false,
         error: orchestratorError('INVALID_INPUT', `Worker profile ${input.profile} was not found in ${profilesFile}`, {
@@ -285,29 +310,70 @@ export class OrchestratorService {
       profiles_file: profilesFile,
       profiles: Object.values(loaded.profiles.profiles)
         .sort((a, b) => a.id.localeCompare(b.id))
-        .map((profile) => ({
-          id: profile.id,
-          backend: profile.backend,
-          model: profile.model ?? null,
-          variant: profile.variant ?? null,
-          reasoning_effort: profile.reasoning_effort ?? null,
-          service_tier: profile.service_tier ?? null,
-          description: profile.description ?? null,
-          metadata: profile.metadata ?? {},
-          capability: {
-            backend: profile.capability.backend,
-            display_name: profile.capability.display_name,
-            availability_status: profile.capability.availability_status,
-            supports_start: profile.capability.supports_start,
-            supports_resume: profile.capability.supports_resume,
-          },
-        })),
+        .map(formatValidProfile),
+      invalid_profiles: invalidProfileList(loaded.profiles),
+      diagnostics: loaded.profiles.errors,
     });
   }
 
-  private async loadLiveWorkerProfiles(profilesFile: string): ReturnType<typeof loadValidatedWorkerProfilesFromFile> {
+  async upsertWorkerProfile(params: unknown): Promise<ToolResult> {
+    const parsed = UpsertWorkerProfileInputSchema.safeParse(params);
+    if (!parsed.success) return invalidInput(parsed.error.message);
+    const input = parsed.data;
+    const profilesFile = resolveWorkerProfilesFile(input.profiles_file, input.cwd);
+    const loaded = await readWorkerProfileManifestForUpdate(profilesFile);
+    if (!loaded.ok) return wrapErr(loaded.error);
+    const previous = loaded.manifest.profiles[input.profile] ?? null;
+    if (!previous && !input.create_if_missing) {
+      return wrapErr(orchestratorError('INVALID_INPUT', `Worker profile ${input.profile} was not found in ${profilesFile}`, {
+        profile: input.profile,
+        profiles_file: profilesFile,
+      }));
+    }
+
+    const nextProfile = workerProfileFromUpsert(input);
+    const nextManifest: WorkerProfileManifest = {
+      version: loaded.manifest.version,
+      profiles: {
+        ...loaded.manifest.profiles,
+        [input.profile]: nextProfile,
+      },
+    };
+
+    const parsedManifest = parseWorkerProfileManifest(nextManifest);
+    if (!parsedManifest.ok) {
+      return wrapErr(orchestratorError('INVALID_INPUT', `Worker profiles manifest would be invalid: ${parsedManifest.errors.join('; ')}`, {
+        profiles_file: profilesFile,
+        errors: parsedManifest.errors,
+      }));
+    }
     const status = await getBackendStatus();
-    return loadValidatedWorkerProfilesFromFile(profilesFile, createWorkerCapabilityCatalog(status));
+    const inspected = inspectWorkerProfiles(parsedManifest.value, createWorkerCapabilityCatalog(status));
+    const invalidTarget = inspected.invalid_profiles[input.profile];
+    if (invalidTarget) {
+      return wrapErr(orchestratorError('INVALID_INPUT', `Worker profile ${input.profile} would be invalid: ${invalidTarget.errors.join('; ')}`, {
+        profile: input.profile,
+        profiles_file: profilesFile,
+        errors: invalidTarget.errors,
+      }));
+    }
+
+    await mkdir(dirname(profilesFile), { recursive: true, mode: 0o700 });
+    await writeFile(profilesFile, `${JSON.stringify(parsedManifest.value, null, 2)}\n`, { mode: 0o600 });
+    const updated = inspected.profiles[input.profile]!;
+    return wrapOk({
+      profiles_file: profilesFile,
+      profile: formatValidProfile(updated),
+      previous_profile: previous,
+      created: previous === null,
+      invalid_profiles: invalidProfileList(inspected),
+      diagnostics: inspected.errors,
+    });
+  }
+
+  private async loadLiveWorkerProfiles(profilesFile: string): ReturnType<typeof loadInspectedWorkerProfilesFromFile> {
+    const status = await getBackendStatus();
+    return loadInspectedWorkerProfilesFromFile(profilesFile, createWorkerCapabilityCatalog(status));
   }
 
   async sendFollowup(params: unknown): Promise<ToolResult> {
@@ -900,6 +966,72 @@ function preSpawnError(backend: Backend, message: string, context: Record<string
     fatal: true,
     context,
   };
+}
+
+async function readWorkerProfileManifestForUpdate(
+  profilesFile: string,
+): Promise<{ ok: true; manifest: WorkerProfileManifest } | { ok: false; error: OrchestratorError }> {
+  let value: unknown = { version: 1, profiles: {} };
+  try {
+    value = JSON.parse(await readFile(profilesFile, 'utf8')) as unknown;
+  } catch (error) {
+    const code = typeof error === 'object' && error && 'code' in error ? String(error.code) : '';
+    if (code !== 'ENOENT') {
+      return {
+        ok: false,
+        error: orchestratorError('INVALID_INPUT', `Failed to read worker profiles manifest ${profilesFile}: ${error instanceof Error ? error.message : String(error)}`, {
+          profiles_file: profilesFile,
+        }),
+      };
+    }
+  }
+
+  const parsed = parseWorkerProfileManifest(value);
+  if (!parsed.ok) {
+    return {
+      ok: false,
+      error: orchestratorError('INVALID_INPUT', `Worker profiles manifest is invalid: ${parsed.errors.join('; ')}`, {
+        profiles_file: profilesFile,
+        errors: parsed.errors,
+      }),
+    };
+  }
+  return { ok: true, manifest: parsed.value };
+}
+
+function workerProfileFromUpsert(input: UpsertWorkerProfile): WorkerProfile {
+  const profile: WorkerProfile = { backend: input.backend };
+  if (input.model !== undefined) profile.model = input.model;
+  if (input.variant !== undefined) profile.variant = input.variant;
+  if (input.reasoning_effort !== undefined) profile.reasoning_effort = input.reasoning_effort;
+  if (input.service_tier !== undefined) profile.service_tier = input.service_tier;
+  if (input.description !== undefined) profile.description = input.description;
+  if (input.metadata !== undefined) profile.metadata = input.metadata;
+  return profile;
+}
+
+function formatValidProfile(profile: ValidatedWorkerProfile): Record<string, unknown> {
+  return {
+    id: profile.id,
+    backend: profile.backend,
+    model: profile.model ?? null,
+    variant: profile.variant ?? null,
+    reasoning_effort: profile.reasoning_effort ?? null,
+    service_tier: profile.service_tier ?? null,
+    description: profile.description ?? null,
+    metadata: profile.metadata ?? {},
+    capability: {
+      backend: profile.capability.backend,
+      display_name: profile.capability.display_name,
+      availability_status: profile.capability.availability_status,
+      supports_start: profile.capability.supports_start,
+      supports_resume: profile.capability.supports_resume,
+    },
+  };
+}
+
+function invalidProfileList(profiles: InspectedWorkerProfiles): InvalidWorkerProfile[] {
+  return Object.values(profiles.invalid_profiles).sort((a, b) => a.id.localeCompare(b.id));
 }
 
 function hasModelSettingsInput(input: { reasoning_effort?: ReasoningEffort; service_tier?: ServiceTier }): boolean {
