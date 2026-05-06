@@ -4,8 +4,8 @@ Branch: `40-make-tmux-status-and-remote-control-reliable-for-claude-orchestrator
 Plan Slug: `orchestrator-status-hooks`
 Parent Issue: #40
 Created: 2026-05-06
-Updated: 2026-05-06 (revision 5 — human Open-Human-Decisions answers applied; H1, H2, H4, H6-method resolved)
-Status: planning
+Updated: 2026-05-06 (revision 5 — human Open-Human-Decisions answers applied; H1, H2, H4, H6-method resolved; reviewer-feedback iterations applied: #1 F1–F5 + non-blocking, #2 stale-timer anchoring + sidecar ULID validation + Claude worker isolation user-hook fixture, #3 stale-timer busy-loop guard with running/failed_unacked suppressors)
+Status: implementation pass complete (reviewer iterations 1, 2, and 3 applied, re-review pending)
 
 ## Source: GitHub Issue #40
 
@@ -428,91 +428,118 @@ consolidated under T13 (unit) and T14 (integration / live smoke).
 ## Execution Log
 
 ### T1: Define orchestrator status contract types
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** Added `OrchestratorRecordSchema`, `OrchestratorStatusStateSchema`, `OrchestratorStatusSnapshotSchema`, `OrchestratorStatusPayloadSchema`, `SupervisorEventSchema`, `OrchestratorHookCommandEntrySchema` (.strict()), `OrchestratorHooksMapSchema` (.strict()), `OrchestratorHooksFileSchema` (.strict()), `RegisterSupervisorInputSchema`, `SignalSupervisorEventInputSchema`, `UnregisterSupervisorInputSchema`, `GetOrchestratorStatusInputSchema` to `src/contract.ts`. Extended `RpcPolicyContextSchema` with optional `orchestrator_id`. Extended `RpcMethodSchema` with the four new IPC methods.
+- **Notes:** Verified by `pnpm build`; closed-schema rejection covered by `src/__tests__/orchestratorHooksSchema.test.ts` (rejection cases (a)–(d) all green).
 
 ### T2: Generate harness-owned Claude supervisor hooks
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `src/claude/permission.ts` now exports `ClaudeSupervisorHooks`, `CLAUDE_SUPERVISOR_HOOK_EVENT_NAMES`, `composeSupervisorHookCommand`, `buildClaudeSupervisorHooks`. `buildClaudeSupervisorSettings` widens `hooks: Record<string, never>` to a populated nested `hooks.<EventName>[].hooks[]` block whose `command` uses the pinned absolute supervisor-CLI path via `quoteCommandTokens`. `composeSupervisorHookCommand` rejects any non-enumerated event name (injection-style fixture covered in `src/__tests__/claudeHarness.test.ts`).
+- **Notes:** Static-token invariant: command is `'<nodePath>' '<cli.js>' supervisor signal <Event>` with each repo-controlled token POSIX-quoted at generation time.
 
 ### T3: Add `agent-orchestrator supervisor` CLI subcommands
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** New `src/supervisorCli.ts` with `register`, `signal`, `unregister`, `status`. `signal` reads `AGENT_ORCHESTRATOR_ORCH_ID` from env, drains stdin, **never writes to stdout**, and exits **0 on transient/IPC failures, 1 on invalid event, never 2** (Decision 22 / B1). Wired into `src/cli.ts`.
+- **Notes:** Covered by `src/__tests__/supervisorStatusCli.test.ts` (signal stdout invariant, exit-code mapping including never-2, daemon-down transient path).
 
 ### T4: Strip terminal-multiplexer env + add worker flags
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `src/processManager.ts` exports `WORKER_STRIPPED_TERMINAL_ENV_VARS` and `stripTerminalMultiplexerEnv`. `ProcessManager.start` now strips the seven multiplexer vars (`TMUX`, `TMUX_PANE`, `STY`, `WEZTERM_PANE`, `KITTY_WINDOW_ID`, `ITERM_SESSION_ID`, `WT_SESSION`), preserves the rest of the parent env, and adds `AGENT_ORCHESTRATOR_WORKER=1`, `AGENT_ORCHESTRATOR_WORKER_RUN_ID=<run_id>`, and (when known) `AGENT_ORCHESTRATOR_PARENT_ORCHESTRATOR_ID=<id>` derived from the run's `metadata.orchestrator_id`.
+- **Notes:** Covered by `src/__tests__/processManagerEnvIsolation.test.ts`.
 
 ### T5: Claude worker isolation via `disableAllHooks: true`
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `src/backend/claude.ts` exports `CLAUDE_WORKER_SETTINGS_FILENAME` / `CLAUDE_WORKER_SETTINGS_BODY`. `ClaudeBackend` accepts a `RunStore` and writes per-run `claude-worker-settings.json` containing `{ "disableAllHooks": true }` (mode 0o600), then injects `--settings <path>` and `--setting-sources user` into both `start()` and `resume()` invocations. Idempotent across retries because the path is deterministic.
+- **Notes:** Covered by `src/__tests__/claudeWorkerIsolation.test.ts`. Decision 9 (no `CLAUDE_CONFIG_DIR` redirect) holds; T5b stays gated.
 
 ### T5b: Fallback `CLAUDE_CONFIG_DIR` redirect (gated)
-- **Status:** pending (only if T13's worker-hook isolation test fails under Decision 9)
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** deferred (gated)
+- **Evidence:** Not triggered: T13's `claudeWorkerIsolation.test.ts` passes under Decision 9, so the fallback in Decision 9b remains unused.
+- **Notes:** Documented in plan; would only be implemented if a future regression proves `disableAllHooks: true` insufficient against a representative user `~/.claude/settings.json` hook.
 
 ### T6: Daemon orchestrator registry + IPC methods
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** New `src/daemon/orchestratorRegistry.ts` (in-memory map keyed by `orchestrator_id`, `applyEvent` implements Decision 3b mapping). `OrchestratorService.dispatch` wires `register_supervisor`, `signal_supervisor_event`, `unregister_supervisor`, `get_orchestrator_status`. `start_run` and `send_followup` stamp `metadata.orchestrator_id` from `RpcPolicyContext.orchestrator_id` via `stampOrchestratorIdInMetadata`. The MCP frontend (`src/serverPolicy.ts`) forwards the pinned `AGENT_ORCHESTRATOR_ORCH_ID` env into the IPC policy_context for `start_run` and `send_followup` only; the model never authors this field.
+- **Notes:** Covered by `src/__tests__/orchestratorRegistry.test.ts` and the new integration test in `src/__tests__/integration/orchestrator.test.ts` (`orchestrator status flow`). No protocol-version bump needed: existing `PROTOCOL_VERSION_MISMATCH` handling continues to enforce daemon/frontend agreement on the new method enum.
+- **Reviewer-feedback hardening (F1, D10/R8):** `stampOrchestratorIdInMetadata` was tightened to **always strip a caller-supplied `orchestrator_id` first** before re-adding the pinned value. This catches both model-supplied stamps (via `start_run`/`send_followup` `metadata`) and parent-inherited stamps (via `metadataForFollowup`). Helper exported for unit testing and covered by `src/__tests__/orchestratorIdForgePrevention.test.ts` (six cases including the strip-without-pin and replace-with-pin paths) and a new integration scenario in `src/__tests__/integration/orchestrator.test.ts` (`forge prevention: model-supplied metadata.orchestrator_id is stripped in start_run and send_followup unless pinned (D10/R8)`).
 
 ### T6b: RunStore lifecycle observer
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `OrchestratorService.onRunLifecycle()` plus an internal `emitRunLifecycle` are wired around the managed-run start/completion path so the engine is a pure consumer (Decision 20 / B3). Lifecycle events fire on `started`, `terminal`, and on fatal `notification` boundaries with the orchestrator id resolved from `metadata.orchestrator_id`.
+- **Notes:** The status engine subscribes via `service.onRunLifecycle` in `bootDaemon.ts` and recomputes aggregate status with the 250 ms debounce.
 
 ### T7: Launcher integration + Remote Control opt-in
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `src/claude/launcher.ts` parses new flags `--remote-control`, `--remote-control-session-name-prefix`, `--orchestrator-label`. `runClaudeLauncher` generates a ULID orchestrator id, captures display metadata via `captureSupervisorDisplay` (TMUX, TMUX_PANE, `tmux display-message -p -F '#{window_id}'` with `shell:false` 500ms timeout, hostname, label), passes both into `buildClaudeEnvelope`, calls IPC `register_supervisor` before spawn (failures don't block launch), and `unregister_supervisor` on shutdown. The MCP server entry's env pins `AGENT_ORCHESTRATOR_ORCH_ID`; the supervisor's spawn env also exposes it. `--print-config` prints orchestrator id, label, RC enable state, and display metadata.
+- **Notes:** Covered by `src/__tests__/claudeHarness.test.ts` (`--remote-control opt-in (issue #40, T7 / Decision 12) embeds RC settings keys and pins orchestrator id...`) and `src/__tests__/rcConfigSmoke.test.ts`.
+- **Reviewer-feedback hardening (F5, A7 — daemon-restart re-register):** the launcher now writes a registration sidecar at `<store_root>/orchestrators/<orchestrator_id>.json` (mode 0o600) before calling `register_supervisor`, and removes it on unregister. New helper module `src/daemon/orchestratorSidecar.ts` exports `writeOrchestratorSidecar` / `readOrchestratorSidecar` / `removeOrchestratorSidecar`. The supervisor signal CLI in `src/supervisorCli.ts` detects the daemon's `INVALID_INPUT: Unknown orchestrator id` response (whether wrapped in the IPC result envelope or thrown), reads the sidecar, calls `register_supervisor` with the cached record, and retries `signal_supervisor_event` once. Exit codes still per D22 (0 / 1 / never 2). Covered by `src/__tests__/supervisorStatusCli.test.ts → 'on unknown_orchestrator the CLI re-registers from <store_root>/orchestrators/<id>.json and retries the signal'` (uses a real `IpcServer` simulating a freshly-restarted daemon and asserts the call sequence `signal_supervisor_event → register_supervisor → signal_supervisor_event`).
 
 ### T8: Aggregate status state machine + hook-emission scheduler
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** New `src/daemon/orchestratorStatus.ts` exports `STALE_AFTER_SECONDS = 600` (Decision 17), `HOOK_EMISSION_DEBOUNCE_MS = 250`, `computeOrchestratorStatusSnapshot` (5-rule live-state precedence per Decision 3b plus stale override), `buildOrchestratorStatusPayload`, and `OrchestratorStatusEngine` (debounced + de-duped emission to the hook executor).
+- **Notes:** Covered by `src/__tests__/orchestratorStatus.test.ts` including the AC8 invariant test pair (sticky `waiting_for_user` does not mask `in_progress` while running children exist; symmetric test where `supervisor_turn_active = false` but a running child still drives `in_progress`).
+- **Reviewer-feedback hardening (F4, D3b rule 1 / D17):**
+  - `OrchestratorService.collectOwnedRunSnapshot` now counts unacked `fatal_error` notifications across **all** owned runs (running + terminal), not just terminal runs, so D3b rule 1 (`attention`) dominates as soon as any owned run has an unacked fatal regardless of its lifecycle state.
+  - `OrchestratorService.failPreSpawn` emits `terminal` and (for fatal errors) `notification` lifecycle events into the engine via `emitRunLifecycle`, so a pre-spawn failure recomputes the aggregate immediately.
+  - `OrchestratorService.ackRunNotification` schedules a recompute for every registered orchestrator on a successful ack (engine de-dup collapses no-ops), so `attention` clears when its driving fatal_error is acknowledged.
+  - `OrchestratorStatusEngine` arms a one-shot stale timer; engine accepts injectable `scheduleTimer` / `cancelTimer` test seams.
+- **Reviewer iteration #2 hardening (stale timer correctness):**
+  - The stale timer is now armed at `last_supervisor_event_at + STALE_AFTER_SECONDS`, **not** `now() + STALE_AFTER_SECONDS`. A non-supervisor recompute mid-window (e.g. owned worker run completes) cancels the previous timer and re-arms with `delayMs = max(0, deadlineMs - now())`, so the absolute stale deadline stays anchored to the last supervisor event. This closes the bug where a recompute at t+590s would otherwise have pushed stale emission to t+1190s.
+  - `resetStaleTimer` skips re-arming once the computed status is already `stale`, so a stale orchestrator does not generate periodic stale timers indefinitely. The next genuine supervisor event (which updates `last_supervisor_event_at` via the registry) will re-arm a fresh timer relative to the refreshed timestamp.
+  - Coverage: four tests in `src/__tests__/orchestratorStatus.test.ts → 'OrchestratorStatusEngine — stale timer (F4 + iteration #2 hardening)'` using a hand-rolled timer driver that captures both `delayMs` and `scheduledAtMs` so the test can compute and assert the absolute deadline drift:
+    1. last event 590s old → next stale timer armed with delay ≈ 10s, not ≈ 600s.
+    2. Non-supervisor recomputes do not postpone the stale deadline (deadline drift < 200ms across multiple recomputes).
+    3. After a stale recompute fires, no further stale timer is re-armed; only a fresh supervisor event (refreshed `last_supervisor_event_at`) re-arms a new timer relative to the new timestamp.
+    4. Original session_active → fire stale timer → `stale` emission with `previous_status = 'idle'` test still passes; additionally asserts no re-arm after the stale emission.
+- **Reviewer iteration #3 hardening (stale timer busy-loop guard):**
+  - `resetStaleTimer` now also skips arming while owned-run suppressors hold the aggregate above `stale`: `snapshot.running > 0 || snapshot.failed_unacked > 0`. Without this guard a past-deadline stale timer would clamp to `delayMs = 0`, fire, recompute (still suppressed), and re-arm a new zero-delay timer — a CPU/log busy-loop. Lifecycle/ack recomputes already wake the engine when those suppressors clear (terminal → `emitRunLifecycle('terminal')`, ack → service-level recompute fan-out), so stale is correctly emitted at that point because `last_supervisor_event_at` is already past the threshold.
+  - Coverage: two new regression tests in the same suite:
+    1. `running > 0` with a deadline already past → exactly one `in_progress` emission, no stale timer armed; clearing `running` to `0` and recomputing produces an immediate `stale` emission.
+    2. `failed_unacked > 0` with a deadline already past → exactly one `attention` emission, no stale timer armed; simulating ack (`failed_unacked` → `0`) and recomputing produces an immediate `stale` emission.
 
 ### T9: Hook executor + `hooks.json` v1 loader
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** New `src/daemon/orchestratorHooks.ts` exports `OrchestratorHookExecutor`, `defaultHooksFilePath`, `DEFAULT_HOOK_TIMEOUT_MS`, `MAX_HOOK_TIMEOUT_MS`, `readAndValidateHooksFile`. Loader caches by mtime, rereads on change. Executor invokes user `command` via `child_process.spawn(command, { shell: true, stdio: ['pipe','pipe','pipe'], env: <restricted>, detached: <POSIX> })` (Decision 7 + F2), captures stdout/stderr to `<store_root>/hooks/<orchestrator_id>/<event>-<event_id>.log` (mode 0o600), enforces `timeout_ms` (default 1500ms, max 5000ms) via `setTimeout` followed by `process.kill(-pid, 'SIGKILL')` on POSIX **and** `child.kill('SIGKILL')`, and never throws into the caller. Emit is fire-and-forget; engine never awaits hook completion.
+- **Notes:** Covered by `src/__tests__/orchestratorHooks.test.ts` (happy-path shell command with stdio capture, timeout SIGKILL, grandchild-survives-timeout test for F2, log-mode-0o600, restricted-env-passthrough leak probe, log_capture_failed counter via malformed orchestrator id, missing file, schema-invalid file rejection).
+- **Reviewer-feedback hardening (F2, F3):**
+  - **F2 — process-group kill.** Hook spawns now use `detached: process.platform !== 'win32'` so the shell command (and any grandchildren it forks) lives in its own process group. Timeout SIGKILLs the entire group via `process.kill(-pid, 'SIGKILL')` followed by `child.kill('SIGKILL')` as a fallback. The new `'timeout SIGKILLs grandchildren too'` unit test forks a `sleep` grandchild, fires the timeout, and asserts the grandchild's pid is dead via `process.kill(pid, 0)`.
+  - **F3 — log-stream errors never escape.** Both `WriteStream.on('error', ...)` and `child.stdout.on('error', ...)` / `child.stderr.on('error', ...)` listeners are attached; on stream error the executor bumps `counters.log_capture_failed` and continues. Log-dir creation failures fall through to `stdio: ['pipe', 'ignore', 'ignore']` so timeout/exit semantics still hold. Path components are sanitized via strict ULID grammar (`/^[0-9A-HJKMNP-TV-Z]{26}$/`) for `orchestrator.id` and `event_id`, plus a closed `ALLOWED_HOOK_EVENTS` set for `event`, so a malformed payload cannot escape `<store_root>/hooks/` via `..` or absolute-path segments. New `log_capture_failed` counter exposed on `OrchestratorHookExecutor.counters`.
 
 ### T10: CLI subcommand `agent-orchestrator supervisor status` (resolves H2 = (c))
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** Implemented in `src/supervisorCli.ts` (`runStatus`). Reads `--orchestrator-id <id>` or falls back to `AGENT_ORCHESTRATOR_ORCH_ID` env. Calls IPC `get_orchestrator_status` and prints JSON `{ orchestrator: {...}, status: {...}, display: {...} }` on stdout. Exits **0 on success, 1 on missing/unknown id, never 2**. The top-level `agent-orchestrator status` subcommand is unchanged. `src/__tests__/supervisorStatusCli.test.ts` asserts no new MCP tool is added (Decision 24).
+- **Notes:** No MCP tool is registered; the model would have to invoke this CLI through the existing pinned Bash allowlist if a future skill needed it.
 
 ### T11: Update Claude passthrough validator + launcher help
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `src/claude/passthrough.ts` adds `--remote-control-session-name-prefix` to `ALLOWED_FLAG_TOKENS`. `claudeLauncherHelp()` documents `--remote-control`, `--remote-control-session-name-prefix`, and `--orchestrator-label` plus the new passthrough entry. Test `passthrough validator accepts --remote-control-session-name-prefix as an allowed Claude flag` covers the new allow.
+- **Notes:** Existing forbidden-flag tests stay green.
 
 ### T12: Example tmux hook + docs
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** New `examples/hooks/tmux-status.sh` (executable; ASCII state labels by default with `AGENT_ORCHESTRATOR_HOOK_USE_EMOJI=1` opt-in), referenced from new `docs/development/orchestrator-status-hooks.md` describing the v1 payload, hooks.json schema, threat model, execution semantics, and `agent-orchestrator supervisor status` CLI.
+- **Notes:** README also gains a "Status hooks (issue #40)" subsection that mentions both `--remote-control` and `--orchestrator-label` per Decision 23 and links to the example + doc.
 
 ### T13: Unit test suite (split by area)
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** New independent test files: `orchestratorStatus.test.ts` (5-rule precedence + AC8 + F4 stale-timer with hand-rolled timer driver), `orchestratorHooks.test.ts` (executor / shell:true / timeout SIGKILL / **F2 grandchild process-group kill** / **log-mode 0o600** / **restricted env passthrough leak probe** / **F3 log_capture_failed counter** / missing file / schema-invalid), `orchestratorHooksSchema.test.ts` (closed-schema rejection (a)/(b)/(c)/(d), positive accept of arbitrary shell metacharacters per H4), `orchestratorRegistry.test.ts` (register / id forge prevention / supervisor event mapping / unregister), `orchestratorIdForgePrevention.test.ts` (**F1 strip-then-add invariant**, six cases including parent-inherited stamp), `claudeWorkerIsolation.test.ts` (asserts `--settings <per-run>` + `--setting-sources user` + on-disk `disableAllHooks: true`), `processManagerEnvIsolation.test.ts` (multiplexer-only strip, unrelated env preserved, no input mutation), `supervisorStatusCli.test.ts` (signal stdout-empty invariant, never-2, status missing id, **status happy-path through real IpcServer**, **status unknown-id never-2**, **F5 re-register from sidecar via real IpcServer**, no MCP tool registered). Extensions to `claudeHarness.test.ts` cover hook composition, injection-style rejection, RC opt-in settings, RC argv pair, and `--remote-control-session-name-prefix` passthrough.
+- **Notes:** All 391 tests pass via `pnpm test` after reviewer iteration #3 (stale-timer busy-loop guard + two regression tests for the `running` and `failed_unacked` suppressor branches).
+- **Reviewer iteration #2 additions:**
+  - `orchestratorStatus.test.ts` gained four stale-timer tests that explicitly assert the deadline is anchored to `last_supervisor_event_at` (delay ≈ remaining-window, not full `STALE_AFTER_SECONDS`), that non-supervisor recomputes don't postpone the deadline, that no periodic re-arm happens after the aggregate becomes `stale`, and that a fresh supervisor event re-arms with a new deadline.
+  - `claudeWorkerIsolation.test.ts` gained a fixture-based test that writes a representative user `~/.claude/settings.json` with hooks into a temp HOME, then asserts the worker invocation pins `--settings <per-run>` (with `disableAllHooks: true`) and `--setting-sources user`, and that the argv builder does not execute the user hook (sentinel file does not exist). A `TODO(t13b)` note marks the live-binary verification as deferred to the opt-in `AGENT_ORCHESTRATOR_RC_LIVE_SMOKE` path.
+  - `src/daemon/orchestratorSidecar.ts` now applies the same strict ULID grammar (`/^[0-9A-HJKMNP-TV-Z]{26}$/`) used by the hook log path, so a malformed orchestrator id cannot produce a path-traversal segment under `<store_root>/orchestrators/`. `writeOrchestratorSidecar` throws on a non-ULID id; `readOrchestratorSidecar` / `removeOrchestratorSidecar` degrade to "no sidecar found" / no-op.
 
 ### T14: Integration test + RC config smoke (offline)
-- **Status:** pending
-- **Evidence:** pending — must record Claude binary version observed by `--print-discovery`
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `src/__tests__/integration/orchestrator.test.ts` `orchestrator status flow` exercises register → turn_started → in_progress → turn_stopped + waiting_for_user → start_run with stamped `metadata.orchestrator_id` (verifying AC8) → wait_for_run → waiting_for_user transition → session_ended → stale → unregister. New `forge prevention: model-supplied metadata.orchestrator_id is stripped in start_run and send_followup unless pinned (D10/R8)` integration scenario covers the F1 wiring end-to-end through the real dispatcher with the mock-CLI fixture. `src/__tests__/rcConfigSmoke.test.ts` asserts the offline RC config smoke (RC keys, hooks block from T2, pinned absolute CLI path, orchestrator label).
+- **Notes:** **Recorded Claude version observed by `--print-discovery` (Decision 12, R7): `claude 2.1.129 (Claude Code)`** captured by running `node dist/cli.js claude --print-discovery` on this branch.
 
 ### T14b: RC live smoke (deferred / opt-in)
 - **Status:** deferred (opt-in via `AGENT_ORCHESTRATOR_RC_LIVE_SMOKE=1`; offline T14 is the default sufficient gate)
-- **Evidence:** pending — must record Claude binary version under test when scheduled
-- **Notes:** pending
+- **Evidence:** Not scheduled in this implementation pass.
+- **Notes:** Skeleton hook in plan still applies; the offline T14 fixture provides the harness/Claude-config invariants without requiring Anthropic credentials in CI.
 
 ### T15: Docs + release notes
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** README "Claude Code Orchestration Mode" section gains a "Status hooks (issue #40)" subsection mentioning both `--remote-control` and `--orchestrator-label` plus the `agent-orchestrator supervisor status` CLI. New doc `docs/development/orchestrator-status-hooks.md` covers the Claude-parity hooks.json v1 schema, threat model, payload, worker isolation, hook execution counters (with surfacing through `get_observability_snapshot` flagged as deferred), and a worked tmux example. Updated `PUBLISHING.md` with an "Issue #40 release notes" subsection covering the new IPC methods, user config file, launcher flags, supervisor CLI subcommand family, and an explicit clarification that `PROTOCOL_VERSION` is unchanged at `1` (the new IPC methods are additive); package-version skew remains enforced separately. Supervisor system prompt gains a short paragraph that turn signaling is automatic and the user's tmux/desktop hook will see it.
+- **Notes:** `pnpm test` green (385 pass, 1 skipped) after reviewer-feedback hardening; `pnpm verify` audit failure for `ip-address` is **pre-existing** on this branch's base (advisory dated 2026-05-05; fix lives on PR #38 branch `b23c6ba` which is not yet merged into main and not present on this branch), and is unrelated to this implementation.
