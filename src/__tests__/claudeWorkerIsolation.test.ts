@@ -22,7 +22,7 @@ describe('Claude worker isolation (issue #40, T5 / Decision 9)', () => {
         runId: meta.run_id,
         cwd: root,
         prompt: 'hi',
-        modelSettings: { reasoning_effort: null, service_tier: null, mode: null },
+        modelSettings: { reasoning_effort: null, service_tier: null, mode: null, codex_network: null },
       });
       const settingsIndex = invocation.args.findIndex((arg) => arg === '--settings');
       assert.ok(settingsIndex >= 0, 'invocation must include --settings');
@@ -52,7 +52,7 @@ describe('Claude worker isolation (issue #40, T5 / Decision 9)', () => {
         runId: meta.run_id,
         cwd: root,
         prompt: 'continue',
-        modelSettings: { reasoning_effort: null, service_tier: null, mode: null },
+        modelSettings: { reasoning_effort: null, service_tier: null, mode: null, codex_network: null },
       });
       assert.ok(invocation.args.includes('--settings'));
       assert.ok(invocation.args.includes('--setting-sources'));
@@ -67,7 +67,7 @@ describe('Claude worker isolation (issue #40, T5 / Decision 9)', () => {
     const invocation = await backend.start({
       cwd: '/tmp',
       prompt: 'hi',
-      modelSettings: { reasoning_effort: null, service_tier: null, mode: null },
+      modelSettings: { reasoning_effort: null, service_tier: null, mode: null, codex_network: null },
     });
     assert.ok(!invocation.args.includes('--settings'));
     assert.ok(!invocation.args.includes('--setting-sources'));
@@ -115,7 +115,7 @@ describe('Claude worker isolation (issue #40, T5 / Decision 9)', () => {
         runId: meta.run_id,
         cwd: root,
         prompt: 'do work',
-        modelSettings: { reasoning_effort: null, service_tier: null, mode: null },
+        modelSettings: { reasoning_effort: null, service_tier: null, mode: null, codex_network: null },
       });
 
       // 1. The worker invocation pins a per-run settings file...

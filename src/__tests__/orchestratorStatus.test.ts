@@ -7,6 +7,8 @@ import {
 import type { OrchestratorState } from '../daemon/orchestratorRegistry.js';
 import type { OwnedRunSnapshot } from '../daemon/orchestratorStatus.js';
 
+const LIVE_NOW_MS = Date.parse('2026-05-06T12:05:00.000Z');
+
 function makeState(overrides: Partial<OrchestratorState['record']> = {}, flags: Partial<OrchestratorState> = {}): OrchestratorState {
   return {
     record: {
@@ -26,16 +28,20 @@ function makeState(overrides: Partial<OrchestratorState['record']> = {}, flags: 
   };
 }
 
+function computeStatus(state: OrchestratorState, ownedRuns: OwnedRunSnapshot) {
+  return computeOrchestratorStatusSnapshot(state, ownedRuns, LIVE_NOW_MS);
+}
+
 describe('computeOrchestratorStatusSnapshot — 5-rule live-state precedence', () => {
   it('rule 1: attention dominates everything else', () => {
     const state = makeState({}, { supervisor_turn_active: true, waiting_for_user: true });
-    const status = computeOrchestratorStatusSnapshot(state, { running: 3, failed_unacked: 1 });
+    const status = computeStatus(state, { running: 3, failed_unacked: 1 });
     assert.equal(status.state, 'attention');
   });
 
   it('rule 2 (AC8): in_progress because running children dominates a sticky waiting_for_user flag', () => {
     const state = makeState({}, { waiting_for_user: true, supervisor_turn_active: false });
-    const status = computeOrchestratorStatusSnapshot(state, { running: 2, failed_unacked: 0 });
+    const status = computeStatus(state, { running: 2, failed_unacked: 0 });
     assert.equal(status.state, 'in_progress');
     assert.equal(status.running_child_count, 2);
     assert.equal(status.waiting_for_user, true, 'sticky flag stays set on the snapshot');
@@ -43,53 +49,53 @@ describe('computeOrchestratorStatusSnapshot — 5-rule live-state precedence', (
 
   it('AC8 symmetric: with supervisor_turn_active=false but running children, aggregate is still in_progress', () => {
     const state = makeState({}, { supervisor_turn_active: false, waiting_for_user: false });
-    const status = computeOrchestratorStatusSnapshot(state, { running: 1, failed_unacked: 0 });
+    const status = computeStatus(state, { running: 1, failed_unacked: 0 });
     assert.equal(status.state, 'in_progress');
   });
 
   it('AC8 transition: when running children clear and waiting_for_user is sticky, aggregate transitions to waiting_for_user', () => {
     const state = makeState({}, { waiting_for_user: true });
-    const before = computeOrchestratorStatusSnapshot(state, { running: 1, failed_unacked: 0 });
+    const before = computeStatus(state, { running: 1, failed_unacked: 0 });
     assert.equal(before.state, 'in_progress');
-    const after = computeOrchestratorStatusSnapshot(state, { running: 0, failed_unacked: 0 });
+    const after = computeStatus(state, { running: 0, failed_unacked: 0 });
     assert.equal(after.state, 'waiting_for_user');
   });
 
   it('rule 3: waiting_for_user when no children and rules 1/2 do not match', () => {
     const state = makeState({}, { waiting_for_user: true });
-    const status = computeOrchestratorStatusSnapshot(state, { running: 0, failed_unacked: 0 });
+    const status = computeStatus(state, { running: 0, failed_unacked: 0 });
     assert.equal(status.state, 'waiting_for_user');
   });
 
   it('rule 4: in_progress because supervisor mid-turn when no children and no waiting flag', () => {
     const state = makeState({}, { supervisor_turn_active: true });
-    const status = computeOrchestratorStatusSnapshot(state, { running: 0, failed_unacked: 0 });
+    const status = computeStatus(state, { running: 0, failed_unacked: 0 });
     assert.equal(status.state, 'in_progress');
   });
 
   it('rule 5: idle when nothing else applies', () => {
     const state = makeState();
-    const status = computeOrchestratorStatusSnapshot(state, { running: 0, failed_unacked: 0 });
+    const status = computeStatus(state, { running: 0, failed_unacked: 0 });
     assert.equal(status.state, 'idle');
   });
 
   it('stale overrides on session_ended', () => {
     const state = makeState({}, { session_ended: true, supervisor_turn_active: true });
-    const status = computeOrchestratorStatusSnapshot(state, { running: 0, failed_unacked: 0 });
+    const status = computeStatus(state, { running: 0, failed_unacked: 0 });
     assert.equal(status.state, 'stale');
   });
 
   it('stale overrides when last_supervisor_event_at is older than STALE_AFTER_SECONDS and no owned runs remain', () => {
-    const lastEvent = new Date(Date.now() - (STALE_AFTER_SECONDS + 60) * 1000).toISOString();
+    const lastEvent = new Date(LIVE_NOW_MS - (STALE_AFTER_SECONDS + 60) * 1000).toISOString();
     const state = makeState({ last_supervisor_event_at: lastEvent });
-    const status = computeOrchestratorStatusSnapshot(state, { running: 0, failed_unacked: 0 });
+    const status = computeStatus(state, { running: 0, failed_unacked: 0 });
     assert.equal(status.state, 'stale');
   });
 
   it('stale does NOT override while children are still running (Decision 4 intersection)', () => {
-    const lastEvent = new Date(Date.now() - (STALE_AFTER_SECONDS + 60) * 1000).toISOString();
+    const lastEvent = new Date(LIVE_NOW_MS - (STALE_AFTER_SECONDS + 60) * 1000).toISOString();
     const state = makeState({ last_supervisor_event_at: lastEvent });
-    const status = computeOrchestratorStatusSnapshot(state, { running: 1, failed_unacked: 0 });
+    const status = computeStatus(state, { running: 1, failed_unacked: 0 });
     assert.equal(status.state, 'in_progress');
   });
 });
