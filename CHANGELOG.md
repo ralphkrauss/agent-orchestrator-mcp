@@ -86,7 +86,7 @@ When a codex worker run starts and `codex_network` was not set explicitly on
 the profile or on the direct-mode `start_run` argument, the daemon emits a
 single non-blocking lifecycle event into the run's event log:
 
-```
+```text
 agent-orchestrator codex_network not set on <profile or direct-mode run>; defaulting to 'isolated' (no network access). Set codex_network explicitly to silence this warning. See docs/development/codex-backend.md for migration.
 ```
 

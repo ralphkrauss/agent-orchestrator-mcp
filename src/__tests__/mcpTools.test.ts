@@ -60,6 +60,10 @@ describe('MCP tool registration', () => {
     assert.equal(Object.hasOwn(followup.properties, 'service_tier'), true);
     // Issue #31 / T9 (OD2=B): send_followup advertises codex_network for direct-mode overrides.
     assert.equal(Object.hasOwn(followup.properties, 'codex_network'), true);
+    assert.deepStrictEqual(
+      (followup.properties.codex_network as { enum: string[] }).enum,
+      ['isolated', 'workspace', 'user-config'],
+    );
     assert.equal(Object.hasOwn(followup.properties, 'idle_timeout_seconds'), true);
     assert.equal(Object.hasOwn(followup.properties, 'execution_timeout_seconds'), true);
     assert.deepStrictEqual(followup.required, ['run_id', 'prompt']);

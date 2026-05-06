@@ -10,13 +10,13 @@ issue #31.
 
 For a normal codex worker `start_run`, the daemon spawns approximately:
 
-```
+```text
 codex exec --json --skip-git-repo-check [<sandbox-args>] --cd <cwd> [--model <model>] [-c model_reasoning_effort="<effort>"] [-c service_tier="<tier>"] -
 ```
 
 For a `send_followup` resume:
 
-```
+```text
 codex exec resume --json --skip-git-repo-check [<sandbox-args>] [--model <model>] [-c model_reasoning_effort="<effort>"] [-c service_tier="<tier>"] <session-id> -
 ```
 
@@ -59,8 +59,11 @@ When a codex profile (or a direct-mode `start_run`) does **not** set
   worker run dispatched against that alias.
 - **Direct-mode `start_run` / `send_followup`**: pass `codex_network` directly
   for one-off overrides (issue #31 OD2 = B). Profile-mode runs reject the
-  argument; the schema-side `superRefine` returns `INVALID_INPUT` so a
-  supervisor that mixes them sees the error early.
+  argument and return `INVALID_INPUT`. For `start_run` the rejection fires at
+  schema parse time via `StartRunInputSchema.superRefine`. For `send_followup`
+  the rejection fires at runtime in the orchestrator service after walking the
+  run chain to locate the originating start (a profile-mode root cannot be
+  bypassed by chained direct-mode follow-ups).
 
 ### Example profile snippets
 
@@ -86,7 +89,7 @@ When a codex profile (or a direct-mode `start_run`) does **not** set
       "backend": "codex",
       "model": "gpt-5.5",
       "codex_network": "user-config",
-      "description": "Honors ~/.codex/config.toml for network policy"
+      "description": "Honors $CODEX_HOME/config.toml for network policy"
     }
   }
 }
@@ -98,7 +101,7 @@ When a codex worker run starts and `codex_network` was not set explicitly on
 the profile or on the direct-mode `start_run` argument, the daemon emits a
 single non-blocking lifecycle event into the run's event log:
 
-```
+```text
 agent-orchestrator codex_network not set on <profile or direct-mode run>; defaulting to 'isolated' (no network access). Set codex_network explicitly to silence this warning. See docs/development/codex-backend.md for migration.
 ```
 
@@ -208,7 +211,7 @@ of `pnpm verify` or CI**: the codex CLI is not available in CI and the
 1. Ensure `codex --version` reports the version under release (`>= 0.128.0`).
 2. Start the local daemon: `agent-orchestrator start` (or use the harness).
 3. Start a direct-mode worker run with `codex_network: 'workspace'`:
-   ```
+   ```ts
    start_run({
      backend: 'codex',
      prompt: 'Run `gh api /zen` and report the response verbatim.',
@@ -222,9 +225,13 @@ of `pnpm verify` or CI**: the codex CLI is not available in CI and the
    - the run's tool-use events show `gh api /zen` returning a zen sentence;
    - the recorded `worker_invocation.args` contains both `--ignore-user-config`
      and the literal `-c sandbox_workspace_write.network_access=true`.
-5. If the smoke fails on the version under release, mark `'workspace'` as
-   `experimental: true` in the codex capability advertised by
-   `createWorkerCapabilityCatalog` and document under "Future Options".
+5. If the smoke fails on the version under release, the only two routine
+   paths are:
+   1. Diagnose and fix the workspace-write argv assembly in
+      `src/backend/codex.ts` so the smoke passes against the version under
+      release; or
+   2. Escalate to the maintainer for explicit human approval before
+      making any capability or contract-shape mitigation.
 
 Record the codex version, the exact argv, the prompt, and the worker's stdout /
 exit in the relevant plan's Execution Log entry for T6.

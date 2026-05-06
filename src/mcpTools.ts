@@ -37,7 +37,7 @@ export const tools = [
         codex_network: {
           type: 'string',
           enum: ['isolated', 'workspace', 'user-config'],
-          description: 'Codex-only network egress posture. isolated (default): --ignore-user-config; codex skips ~/.codex/config.toml; no network. workspace: --ignore-user-config plus -c sandbox_workspace_write.network_access=true; network on. user-config: codex reads ~/.codex/config.toml verbatim. Direct mode only; profile mode rejects this field.',
+          description: 'Codex-only network egress posture. isolated (default): --ignore-user-config; codex skips $CODEX_HOME/config.toml; no network. workspace: --ignore-user-config plus -c sandbox_workspace_write.network_access=true; network on. user-config: codex reads $CODEX_HOME/config.toml verbatim. Direct mode only; profile mode rejects this field.',
         },
         metadata: { type: 'object', additionalProperties: true },
         idle_timeout_seconds: {
@@ -107,7 +107,7 @@ export const tools = [
         codex_network: {
           type: 'string',
           enum: ['isolated', 'workspace', 'user-config'],
-          description: 'Codex-only profile field. Controls codex network egress: isolated (default; --ignore-user-config; no network), workspace (network on; codex skips ~/.codex/config.toml), user-config (codex reads ~/.codex/config.toml verbatim). When omitted, codex profiles default to isolated (issue #31, BREAKING).',
+          description: 'Codex-only profile field. Controls codex network egress: isolated (default; --ignore-user-config; no network), workspace (network on; codex skips $CODEX_HOME/config.toml), user-config (codex reads $CODEX_HOME/config.toml verbatim). When omitted, codex profiles default to isolated (issue #31, BREAKING).',
         },
         description: { type: 'string' },
         metadata: { type: 'object', additionalProperties: true },

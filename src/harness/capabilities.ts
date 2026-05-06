@@ -85,7 +85,7 @@ export function createWorkerCapabilityCatalog(statusReport?: BackendStatusReport
         },
         notes: [
           'Models are user-defined; the backend validates CLI availability and supported settings.',
-          'codex_network controls network egress: isolated (default; --ignore-user-config, no network), workspace (network on, codex skips ~/.codex/config.toml), user-config (codex reads ~/.codex/config.toml verbatim).',
+          'codex_network controls network egress: isolated (default; --ignore-user-config, no network), workspace (network on, codex skips $CODEX_HOME/config.toml), user-config (codex reads $CODEX_HOME/config.toml verbatim).',
         ],
       },
       {
