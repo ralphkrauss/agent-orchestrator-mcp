@@ -73,11 +73,12 @@ installs are not supported. The Claude supervisor's pinned monitor command and
 (for example `C:/Users/<name>/AppData/Roaming/npm/...`) so they do not collide
 with the supervisor's Bash deny list.
 
-The repository's `justfile` recipes also rely on POSIX shell idioms, so on
-Windows `just` must be able to resolve Git Bash's `sh.exe`. Either run `just`
-from inside a Git Bash shell, or ensure that Git's `usr\bin` directory (for
-example `C:\Program Files\Git\usr\bin`) is on `PATH` so PowerShell and CMD can
-find `sh.exe`.
+On Windows, `just` recipes run under PowerShell Desktop and through `node`
+directly for parameter-taking recipes (via `just`'s `[script]` attribute, which
+requires `just >= 1.44`); no Git Bash or `sh.exe` is required for the dev
+workflow. The Git Bash requirement for `agent-orchestrator claude` itself
+(described above) is unchanged because Claude Code uses Bash for its `Bash`
+tool.
 
 The MCP package never installs or bundles worker CLIs. Missing workers are reported by diagnostics and by failed run results, but one missing backend does not prevent the MCP server from starting.
 
