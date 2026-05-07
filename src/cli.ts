@@ -2,10 +2,13 @@
 import { getBackendStatus, formatBackendStatus } from './diagnostics.js';
 import { isDaemonCliCommand, runDaemonCli } from './daemon/daemonCli.js';
 import { HELP_TEXT, decideRootMode } from './cliRoot.js';
+import { formatVersionOutput } from './packageMetadata.js';
 
 const command = process.argv[2];
 
-if (command === 'doctor') {
+if (command === '--version') {
+  process.stdout.write(formatVersionOutput('agent-orchestrator', process.argv.includes('--json')));
+} else if (command === 'doctor') {
   const status = await getBackendStatus();
   if (process.argv.includes('--json')) {
     process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
