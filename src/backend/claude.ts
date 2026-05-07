@@ -80,7 +80,7 @@ export class ClaudeBackend extends BaseBackend {
       `${JSON.stringify(CLAUDE_WORKER_SETTINGS_BODY, null, 2)}\n`,
       { mode: 0o600 },
     );
-    return ['--settings', settingsPath, '--setting-sources', 'user', '--permission-mode', 'bypassPermissions'];
+    return ['--settings', settingsPath, '--setting-sources', 'user', '--permission-mode', CLAUDE_WORKER_SETTINGS_BODY.permissions.defaultMode];
   }
 
   parseEvent(raw: unknown): ParsedBackendEvent {
